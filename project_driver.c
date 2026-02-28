@@ -24,7 +24,7 @@ dev_t dev;
 static struct cdev cdev;
 static struct class* cl;
 
-struct file_operations fops = {
+static const struct file_operations fops = {
     .owner = THIS_MODULE,
     .read = mod_read,
 };
@@ -33,23 +33,23 @@ static int __init custom_init(void) {
     // get a device number (cat /proc/devices)
     if (alloc_chrdev_region(&dev, 0, 1, "uniproject")) {
         printk(KERN_ERR "device allocation failed!");
-        return -1;
+        return -ECANCELED;
     }
 
     // make a device class (ls /sys/class)
     if (!(cl = class_create("uniprojclass"))) {
         printk(KERN_ERR "class creation failed!");
         unregister_chrdev_region(dev, 1);
-        return -1;
+        return -ECANCELED;
     }
 
     // initialize chardevice
     cdev_init(&cdev, &fops);
-    if (cdev_add(&cdev, dev, 1) == -1) {
+    if (cdev_add(&cdev, dev, 1) < 0) {
         printk(KERN_ERR "chardevice init failed!");
         class_destroy(cl);
         unregister_chrdev_region(dev, 1);
-        return -1;
+        return -ECANCELED;
     }
 
     // create the device (ls /dev)
@@ -58,13 +58,13 @@ static int __init custom_init(void) {
         cdev_del(&cdev);
         class_destroy(cl);
         unregister_chrdev_region(dev, 1);
-        return -1;
+        return -ECANCELED;
     }
 
     major = MAJOR(dev);
 
 #ifdef DEBUG
-    printk(KERN_INFO "placeholder loaded (%d)\n", major);
+    printk(KERN_INFO "placeholder loaded (major num: %d)\n", major);
 #endif
 
     return 0;
