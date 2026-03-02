@@ -24,9 +24,25 @@ dev_t dev;
 static struct cdev cdev;
 static struct class* cl;
 
+static int mod_open(struct inode* inode, struct file* fileptr) {
+    pr_info("Major device number: %d | Minor device number: %d\n", imajor(inode), iminor(inode));
+
+    pr_info("Fileptr->f_pos : %lld\n", fileptr->f_pos);
+    pr_info("Fileptr->f_mode : %lld\n", fileptr->f_mode);
+    pr_info("Fileptr->f_flags: %lld\n", fileptr->f_flags);
+    return 0;
+}
+
+static int mod_release(struct inode* inode, struct file* fileptr) {
+    pr_info("The file has closed");
+    return 0;
+}
+
 static const struct file_operations fops = {
     .owner = THIS_MODULE,
     .read = mod_read,
+    .open = mod_open,
+    .release = mod_release,
 };
 
 static int __init custom_init(void) {
