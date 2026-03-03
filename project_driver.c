@@ -45,22 +45,22 @@ static int mod_release(struct inode* inode, struct file* fileptr) {
 }
 
 static long mod_ioctl(struct file *file, unsigned int cmd, unsigned long arg) { // written by Hazel
-    char temp;
+    char temp; 
     switch (cmd) {
-        case SET_CHAR:
+        case SET_CHAR: //to set the charater to userspace value
             if (copy_from_user(&temp, (char _user *)arg, sizeof(char))) {
-                return -EFAULT;
+                return -EFAULT; // if copy_from_user fails, return error code
             }
 
             stored_char = temp;
-            pr_info("character set to: %c\n", stored_char);
+            pr_info("character set to: %c\n", stored_char); // debug print to confirm character was set
             break;
 
-        case GET_CHAR:
+        case GET_CHAR: //to get character from kernel and copy to userspace
             if (copy_to_user((char _user *)arg, &stored_char, sizeof(char))) {
-                return -EFAULT;
+                return -EFAULT; // if copy_to_user fails, return error code
             }
-            pr_info("charater returned: %c\n", stored_char);
+            pr_info("character returned: %c\n", stored_char); // debug print to confirm character was returned
             break;
         
         default:
