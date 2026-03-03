@@ -2,6 +2,7 @@
 #include <linux/cdev.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/usb.h>
 
 #define DEBUG // debug prints
 
@@ -19,6 +20,13 @@ static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t
     return nbytes;
 }
 
+static int usb_probe(struct usb_interface* intf, const struct usb_device_id* id) {
+    printk(KERN_INFO "usb plugged in\n");
+    return 0;
+}
+
+static void usb_dc(struct usb_interface* intf) { printk(KERN_INFO "disconnecting usb\n"); }
+
 int major;
 dev_t dev;
 static struct cdev cdev;
@@ -34,7 +42,7 @@ static int mod_open(struct inode* inode, struct file* fileptr) {
 }
 
 static int mod_release(struct inode* inode, struct file* fileptr) {
-    pr_info("The file has closed");
+    pr_info("The file has closed\n");
     return 0;
 }
 
@@ -45,16 +53,25 @@ static const struct file_operations fops = {
     .release = mod_release,
 };
 
+struct usb_device_id usbdid[] = {{USB_DEVICE(0x2e8a, 0x0009)}, {}};
+
+static struct usb_driver usbd = {
+    .name = "uniproject",
+    .probe = usb_probe,
+    .disconnect = usb_dc,
+    .id_table = usbdid,
+};
+
 static int __init custom_init(void) {
     // get a device number (cat /proc/devices)
     if (alloc_chrdev_region(&dev, 0, 1, "uniproject")) {
-        printk(KERN_ERR "device allocation failed!");
+        printk(KERN_ERR "device allocation failed!\n");
         return -ECANCELED;
     }
 
     // make a device class (ls /sys/class)
     if (!(cl = class_create("uniprojclass"))) {
-        printk(KERN_ERR "class creation failed!");
+        printk(KERN_ERR "class creation failed!\n");
         unregister_chrdev_region(dev, 1);
         return -ECANCELED;
     }
@@ -62,7 +79,7 @@ static int __init custom_init(void) {
     // initialize chardevice
     cdev_init(&cdev, &fops);
     if (cdev_add(&cdev, dev, 1) < 0) {
-        printk(KERN_ERR "chardevice init failed!");
+        printk(KERN_ERR "chardevice init failed!\n");
         class_destroy(cl);
         unregister_chrdev_region(dev, 1);
         return -ECANCELED;
@@ -70,7 +87,16 @@ static int __init custom_init(void) {
 
     // create the device (ls /dev)
     if (!device_create(cl, NULL, dev, NULL, "uniprojdev")) {
-        printk(KERN_ERR "device creation failed!");
+        printk(KERN_ERR "device creation failed!\n");
+        cdev_del(&cdev);
+        class_destroy(cl);
+        unregister_chrdev_region(dev, 1);
+        return -ECANCELED;
+    }
+
+    if (usb_register(&usbd) < 0) {
+        printk(KERN_ERR "USB registration failed!\n");
+        device_destroy(cl, dev);
         cdev_del(&cdev);
         class_destroy(cl);
         unregister_chrdev_region(dev, 1);
@@ -86,6 +112,7 @@ static int __init custom_init(void) {
     return 0;
 }
 static void __exit custom_exit(void) {
+    usb_deregister(&usbd);
     device_destroy(cl, dev);
     cdev_del(&cdev);
     class_destroy(cl);
