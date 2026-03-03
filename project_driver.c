@@ -8,15 +8,56 @@
 MODULE_DESCRIPTION("placeholder description"); // if you don't include this kbuild gets very mad
 MODULE_LICENSE("GPL");                         // same here (why must you force me to use GPL)
 
-static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t* offset) {
-#ifdef DEBUG
-    printk(KERN_INFO "reading %zu bytes\n", nbytes);
-#endif
+typedef struct{
+   int index;
+   char ch;
+}expected_char;
 
-    for (int i = 0; i < nbytes; i++) {
-        put_user('A', &(buf[i]));
-    }
-    return nbytes;
+static expected_char fifo(FIFO_SIZE);
+
+static int fifo_head = 0;
+static int fifo_tail = 0;
+static int fifo_count = 0;
+static DEFINE_SPINLOCK(wpm);
+static DECLARE_WAIT_QUEUE_HEAD(read_wait_queue);
+static DECLARE_WAIT_QUEUE_HEAD(write_wait_queue);
+
+
+
+
+static char device_buffer[BUFFER_SIZE];
+
+static ssize_t drv_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos){
+        
+	size_t bytes_to_write;
+
+	expected_char ec;
+
+	unsigned long flags;
+
+	
+
+	if(count != sizeof(expected_char)){
+            return -EINVALUE;
+	}
+	if(copy_to_user( buf, &ec, sizeof(expected_char))){
+		return -EFAULT;
+	}
+
+ 	if(wait_event_interruptible(wrtie_wait_queue, fifo_count < FIFOSIZE)){
+           return -ERESTARTSYS;
+	}
+
+	spin_lock_irqsave(&wpm_lock, flags);
+
+	fifo[fifo_tail] = ec;
+	fifo_tail = (fifo_tail + 1) % FIFO_SIZE;
+	fifo_count ++;
+
+	spin_unlock_irqrestore(&wpm_lock,flags);
+	wake_up_interruptible(&read_wait_queue);
+
+	return sizeof(expected_char);
 }
 
 int major;
@@ -40,7 +81,7 @@ static int mod_release(struct inode* inode, struct file* fileptr) {
 
 static const struct file_operations fops = {
     .owner = THIS_MODULE,
-    .read = mod_read,
+    .read = drv_read,
     .open = mod_open,
     .release = mod_release,
 };
