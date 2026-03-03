@@ -2,11 +2,17 @@
 #include <linux/cdev.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/ioctl.h>
 
 #define DEBUG // debug prints
+#define IOCTL_MAGIC 'p' 
+#define SET_CHAR _IOW(IOCTL_MAGIC, 0, char)
+#define GET_CHAR _IOR(IOCTL_MAGIC, 1, char)
 
 MODULE_DESCRIPTION("placeholder description"); // if you don't include this kbuild gets very mad
 MODULE_LICENSE("GPL");                         // same here (why must you force me to use GPL)
+
+static char stored_char = 'X';
 
 static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t* offset) {
 #ifdef DEBUG
@@ -14,7 +20,7 @@ static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t
 #endif
 
     for (int i = 0; i < nbytes; i++) {
-        put_user('A', &(buf[i]));
+        put_user(stored_char, &(buf[i]));
     }
     return nbytes;
 }
@@ -38,11 +44,38 @@ static int mod_release(struct inode* inode, struct file* fileptr) {
     return 0;
 }
 
+static long mod_ioctl(struct file *file, unsigned int cmd, unsigned long arg) { // written by Hazel
+    char temp;
+    switch (cmd) {
+        case SET_CHAR:
+            if (copy_from_user(&temp, (char _user *)arg, sizeof(char))) {
+                return -EFAULT;
+            }
+
+            stored_char = temp;
+            pr_info("character set to: %c\n", stored_char);
+            break;
+
+        case GET_CHAR:
+            if (copy_to_user((char _user *)arg, &stored_char, sizeof(char))) {
+                return -EFAULT;
+            }
+            pr_info("charater returned: %c\n", stored_char);
+            break;
+        
+        default:
+            return -EINVAL;
+    }
+
+    return 0;
+}
+
 static const struct file_operations fops = {
     .owner = THIS_MODULE,
     .read = mod_read,
     .open = mod_open,
     .release = mod_release,
+    .unlocked_ioctl = mod_ioctl,
 };
 
 static int __init custom_init(void) {
