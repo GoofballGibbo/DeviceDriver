@@ -5,45 +5,96 @@
 #include <linux/usb.h>
 
 #define DEBUG // debug prints
+#define FIFO_SIZE 256
 
-MODULE_DESCRIPTION("placeholder description"); // if you don't include this kbuild gets very mad
-MODULE_LICENSE("GPL");                         // same here (why must you force me to use GPL)
+typedef struct {
+  int index;
+  char ch;
+} expected_char;
 
-static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t* offset) {
+static expected_char fifo[FIFO_SIZE];
+static int fifo_head = 0;
+static int fifo_tail = 0;
+static int fifo_count = 0;
+
+static DEFINE_SPINLOCK(wpm_lock);
+static DECLARE_WAIT_QUEUE_HEAD(read_wait_queue);
+static DECLARE_WAIT_QUEUE_HEAD(write_wait_queue);
+
+static ssize_t wpm_write(struct file *file, const char __user *user_buf,
+                         size_t len, loff_t *off) {
+  expected_char ec;
+  unsigned long flags;
+
+  if (len != sizeof(expected_char)) {
+    return -EINVAL;
+  }
+
+  if (copy_from_user(&ec, user_buf, sizeof(expected_char))) {
+    return -EFAULT;
+  }
+
+  if (wait_event_interruptible(write_wait_queue, fifo_count < FIFO_SIZE)) {
+    pr_warn("Capacity reached");
+    return -ERESTARTSYS;
+  }
+
+  spin_lock_irqsave(&wpm_lock, flags);
+
+  fifo[fifo_tail] = ec;
+  fifo_tail = (fifo_tail + 1) % FIFO_SIZE;
+  fifo_count++;
+
+  spin_unlock_irqrestore(&wpm_lock, flags);
+  wake_up_interruptible(&read_wait_queue);
+
+  return sizeof(expected_char);
+}
+
+MODULE_DESCRIPTION("placeholder description"); // if you don't include this
+                                               // kbuild gets very mad
+MODULE_LICENSE("GPL"); // same here (why must you force me to use GPL)
+
+static ssize_t mod_read(struct file *fd, char __user *buf, size_t nbytes,
+                        loff_t *offset) {
 #ifdef DEBUG
-    printk(KERN_INFO "reading %zu bytes\n", nbytes);
+  printk(KERN_INFO "reading %zu bytes\n", nbytes);
 #endif
 
-    for (int i = 0; i < nbytes; i++) {
-        put_user('A', &(buf[i]));
-    }
-    return nbytes;
+  for (int i = 0; i < nbytes; i++) {
+    put_user('A', &(buf[i]));
+  }
+  return nbytes;
 }
 
-static int usb_probe(struct usb_interface* intf, const struct usb_device_id* id) {
-    printk(KERN_INFO "usb plugged in\n");
-    return 0;
+static int usb_probe(struct usb_interface *intf,
+                     const struct usb_device_id *id) {
+  printk(KERN_INFO "usb plugged in\n");
+  return 0;
 }
 
-static void usb_dc(struct usb_interface* intf) { printk(KERN_INFO "disconnecting usb\n"); }
+static void usb_dc(struct usb_interface *intf) {
+  printk(KERN_INFO "disconnecting usb\n");
+}
 
 int major;
 dev_t dev;
 static struct cdev cdev;
-static struct class* cl;
+static struct class *cl;
 
-static int mod_open(struct inode* inode, struct file* fileptr) {
-    pr_info("Major device number: %d | Minor device number: %d\n", imajor(inode), iminor(inode));
+static int mod_open(struct inode *inode, struct file *fileptr) {
+  pr_info("Major device number: %d | Minor device number: %d\n", imajor(inode),
+          iminor(inode));
 
-    pr_info("Fileptr->f_pos : %lld\n", fileptr->f_pos);
-    pr_info("Fileptr->f_mode : %lld\n", fileptr->f_mode);
-    pr_info("Fileptr->f_flags: %lld\n", fileptr->f_flags);
-    return 0;
+  pr_info("Fileptr->f_pos : %lld\n", fileptr->f_pos);
+  pr_info("Fileptr->f_mode : %lld\n", fileptr->f_mode);
+  pr_info("Fileptr->f_flags: %lld\n", fileptr->f_flags);
+  return 0;
 }
 
-static int mod_release(struct inode* inode, struct file* fileptr) {
-    pr_info("The file has closed\n");
-    return 0;
+static int mod_release(struct inode *inode, struct file *fileptr) {
+  pr_info("The file has closed\n");
+  return 0;
 }
 
 static const struct file_operations fops = {
@@ -51,6 +102,7 @@ static const struct file_operations fops = {
     .read = mod_read,
     .open = mod_open,
     .release = mod_release,
+    .write = wpm_write,
 };
 
 struct usb_device_id usbdid[] = {{USB_DEVICE(0x2e8a, 0x0009)}, {}};
@@ -63,63 +115,63 @@ static struct usb_driver usbd = {
 };
 
 static int __init custom_init(void) {
-    // get a device number (cat /proc/devices)
-    if (alloc_chrdev_region(&dev, 0, 1, "uniproject")) {
-        printk(KERN_ERR "device allocation failed!\n");
-        return -ECANCELED;
-    }
+  // get a device number (cat /proc/devices)
+  if (alloc_chrdev_region(&dev, 0, 1, "uniproject")) {
+    printk(KERN_ERR "device allocation failed!\n");
+    return -ECANCELED;
+  }
 
-    // make a device class (ls /sys/class)
-    if (!(cl = class_create("uniprojclass"))) {
-        printk(KERN_ERR "class creation failed!\n");
-        unregister_chrdev_region(dev, 1);
-        return -ECANCELED;
-    }
+  // make a device class (ls /sys/class)
+  if (!(cl = class_create("uniprojclass"))) {
+    printk(KERN_ERR "class creation failed!\n");
+    unregister_chrdev_region(dev, 1);
+    return -ECANCELED;
+  }
 
-    // initialize chardevice
-    cdev_init(&cdev, &fops);
-    if (cdev_add(&cdev, dev, 1) < 0) {
-        printk(KERN_ERR "chardevice init failed!\n");
-        class_destroy(cl);
-        unregister_chrdev_region(dev, 1);
-        return -ECANCELED;
-    }
+  // initialize chardevice
+  cdev_init(&cdev, &fops);
+  if (cdev_add(&cdev, dev, 1) < 0) {
+    printk(KERN_ERR "chardevice init failed!\n");
+    class_destroy(cl);
+    unregister_chrdev_region(dev, 1);
+    return -ECANCELED;
+  }
 
-    // create the device (ls /dev)
-    if (!device_create(cl, NULL, dev, NULL, "uniprojdev")) {
-        printk(KERN_ERR "device creation failed!\n");
-        cdev_del(&cdev);
-        class_destroy(cl);
-        unregister_chrdev_region(dev, 1);
-        return -ECANCELED;
-    }
+  // create the device (ls /dev)
+  if (!device_create(cl, NULL, dev, NULL, "uniprojdev")) {
+    printk(KERN_ERR "device creation failed!\n");
+    cdev_del(&cdev);
+    class_destroy(cl);
+    unregister_chrdev_region(dev, 1);
+    return -ECANCELED;
+  }
 
-    if (usb_register(&usbd) < 0) {
-        printk(KERN_ERR "USB registration failed!\n");
-        device_destroy(cl, dev);
-        cdev_del(&cdev);
-        class_destroy(cl);
-        unregister_chrdev_region(dev, 1);
-        return -ECANCELED;
-    }
-
-    major = MAJOR(dev);
-
-#ifdef DEBUG
-    printk(KERN_INFO "placeholder loaded (major num: %d)\n", major);
-#endif
-
-    return 0;
-}
-static void __exit custom_exit(void) {
-    usb_deregister(&usbd);
+  if (usb_register(&usbd) < 0) {
+    printk(KERN_ERR "USB registration failed!\n");
     device_destroy(cl, dev);
     cdev_del(&cdev);
     class_destroy(cl);
     unregister_chrdev_region(dev, 1);
+    return -ECANCELED;
+  }
+
+  major = MAJOR(dev);
 
 #ifdef DEBUG
-    printk(KERN_INFO "placeholder ended\n");
+  printk(KERN_INFO "placeholder loaded (major num: %d)\n", major);
+#endif
+
+  return 0;
+}
+static void __exit custom_exit(void) {
+  usb_deregister(&usbd);
+  device_destroy(cl, dev);
+  cdev_del(&cdev);
+  class_destroy(cl);
+  unregister_chrdev_region(dev, 1);
+
+#ifdef DEBUG
+  printk(KERN_INFO "placeholder ended\n");
 #endif
 }
 
