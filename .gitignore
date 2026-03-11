@@ -1,9 +1,9 @@
 # built files
 build
 
-*.o
-*.out
-*.exe
+/Test/*
+!/Test/*.c
+
 # clangd config
 .cache
 .clangd
