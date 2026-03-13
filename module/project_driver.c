@@ -14,6 +14,7 @@ dev_t dev;
 static struct cdev cdev;
 static struct class* cl;
 
+static struct usb_device* usb_dev = NULL;
 
 static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t* offset) {
 #ifdef DEBUG
@@ -24,6 +25,26 @@ static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t
         put_user('A', &(buf[i]));
     }
     return nbytes;
+}
+
+static ssize_t mod_write(struct file* fd, const char __user* buf, size_t nbytes, loff_t* offset) {
+    char msg[3 + 1];
+
+    memset(msg, '\0', sizeof(msg));
+
+    int to_write = min(sizeof(msg) - 1, nbytes);
+
+    printk(KERN_INFO "return was %lu", copy_from_user(msg, buf, to_write));
+
+    if (!usb_dev) {
+        return -ENODEV;
+    }
+
+    // TODO: how do i write to it?????
+
+    printk(KERN_INFO "got %s", msg);
+
+    return to_write;
 }
 
 static int mod_open(struct inode* inode, struct file* fileptr) {
@@ -47,6 +68,7 @@ static int mod_release(struct inode* inode, struct file* fileptr) {
 static const struct file_operations fops = {
     .owner = THIS_MODULE,
     .read = mod_read,
+    .write = mod_write,
     .open = mod_open,
     .release = mod_release,
 };
@@ -56,6 +78,12 @@ static int usb_probe(struct usb_interface* intf, const struct usb_device_id* id)
 #ifdef DEBUG
     printk(KERN_INFO "usb plugged in\n");
 #endif
+
+    if (usb_dev) {
+        return -ENOMEM;
+    }
+
+    usb_dev = interface_to_usbdev(intf);
     return 0;
 }
 
@@ -63,6 +91,8 @@ static void usb_dc(struct usb_interface* intf) {
 #ifdef DEBUG
     printk(KERN_INFO "disconnecting usb\n");
 #endif
+
+    usb_dev = NULL;
 }
 
 struct usb_device_id usbdid[] = {{USB_DEVICE(0x2e8a, 0x0009)}, {}};

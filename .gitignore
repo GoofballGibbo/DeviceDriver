@@ -1,5 +1,6 @@
 # built files
 build
+generated
 
 # clangd config
 .cache
