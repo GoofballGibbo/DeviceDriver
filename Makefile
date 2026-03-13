@@ -1,15 +1,13 @@
-obj-m += project_driver.o
-
-BUILD_DIR   := $(PWD)/build
-SRC_DIR     := $(PWD)
-FW_DIR      := $(PWD)/firmware
-FWBUILD_DIR := $(FW_DIR)/build
+MOD_DIR      := $(PWD)/module
+MODBUILD_DIR := $(MOD_DIR)/build
+FW_DIR       := $(PWD)/firmware
+FWBUILD_DIR  := $(FW_DIR)/build
 
 all: mod fw
 
 mod:
-	mkdir -p $(BUILD_DIR)
-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(SRC_DIR) MO=$(BUILD_DIR) modules
+	mkdir -p $(MODBUILD_DIR)
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(MOD_DIR) MO=$(MODBUILD_DIR) modules
 
 fw:
 	mkdir -p $(FWBUILD_DIR)
@@ -19,8 +17,8 @@ fw:
 clean: mod_clean fw_clean
 
 mod_clean:
-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(SRC_DIR) MO=$(BUILD_DIR) clean
-	rm -rf $(BUILD_DIR)
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(MOD_DIR) MO=$(MODBUILD_DIR) clean
+	rm -rf $(MODBUILD_DIR)
 
 fw_clean:
 	rm -rf $(FWBUILD_DIR)

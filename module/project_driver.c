@@ -6,8 +6,14 @@
 
 #define DEBUG // debug prints
 
-MODULE_DESCRIPTION("placeholder description"); // if you don't include this kbuild gets very mad
-MODULE_LICENSE("GPL");                         // same here (why must you force me to use GPL)
+MODULE_DESCRIPTION("a driver for a uni project"); // if you don't include this kbuild gets very mad
+MODULE_LICENSE("GPL");                            // same here (why must you force me to use GPL)
+
+int major;
+dev_t dev;
+static struct cdev cdev;
+static struct class* cl;
+
 
 static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t* offset) {
 #ifdef DEBUG
@@ -20,29 +26,21 @@ static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t
     return nbytes;
 }
 
-static int usb_probe(struct usb_interface* intf, const struct usb_device_id* id) {
-    printk(KERN_INFO "usb plugged in\n");
-    return 0;
-}
-
-static void usb_dc(struct usb_interface* intf) { printk(KERN_INFO "disconnecting usb\n"); }
-
-int major;
-dev_t dev;
-static struct cdev cdev;
-static struct class* cl;
-
 static int mod_open(struct inode* inode, struct file* fileptr) {
+#ifdef DEBUG
     pr_info("Major device number: %d | Minor device number: %d\n", imajor(inode), iminor(inode));
 
     pr_info("Fileptr->f_pos : %lld\n", fileptr->f_pos);
-    pr_info("Fileptr->f_mode : %lld\n", fileptr->f_mode);
-    pr_info("Fileptr->f_flags: %lld\n", fileptr->f_flags);
+    pr_info("Fileptr->f_mode : %u\n", fileptr->f_mode);
+    pr_info("Fileptr->f_flags: %u\n", fileptr->f_flags);
+#endif
     return 0;
 }
 
 static int mod_release(struct inode* inode, struct file* fileptr) {
+#ifdef DEBUG
     pr_info("The file has closed\n");
+#endif
     return 0;
 }
 
@@ -53,6 +51,20 @@ static const struct file_operations fops = {
     .release = mod_release,
 };
 
+
+static int usb_probe(struct usb_interface* intf, const struct usb_device_id* id) {
+#ifdef DEBUG
+    printk(KERN_INFO "usb plugged in\n");
+#endif
+    return 0;
+}
+
+static void usb_dc(struct usb_interface* intf) {
+#ifdef DEBUG
+    printk(KERN_INFO "disconnecting usb\n");
+#endif
+}
+
 struct usb_device_id usbdid[] = {{USB_DEVICE(0x2e8a, 0x0009)}, {}};
 
 static struct usb_driver usbd = {
@@ -61,6 +73,7 @@ static struct usb_driver usbd = {
     .disconnect = usb_dc,
     .id_table = usbdid,
 };
+
 
 static int __init custom_init(void) {
     // get a device number (cat /proc/devices)
@@ -111,6 +124,7 @@ static int __init custom_init(void) {
 
     return 0;
 }
+
 static void __exit custom_exit(void) {
     usb_deregister(&usbd);
     device_destroy(cl, dev);
