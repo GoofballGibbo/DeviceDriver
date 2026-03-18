@@ -4,6 +4,12 @@ build
 *.o
 *.out
 *.exe
+test1
+WPMTest
+testio
+ioctl
+test
+testblock
 # clangd config
 .cache
 .clangd
