@@ -84,7 +84,7 @@ static DEFINE_SPINLOCK(wpm_lock);
 static DECLARE_WAIT_QUEUE_HEAD(read_wait_queue);
 static DECLARE_WAIT_QUEUE_HEAD(write_wait_queue);
 
-static ssize_t wpm_write(struct file *file, const char __user *user_buf,
+static ssize_t mod_write(struct file *file, const char __user *user_buf,
                          size_t len, loff_t *off) {
   expected_char ec;
   unsigned long flags;
@@ -118,18 +118,42 @@ MODULE_DESCRIPTION("placeholder description"); // if you don't include this
                                                // kbuild gets very mad
 MODULE_LICENSE("GPL"); // same here (why must you force me to use GPL)
 
-static ssize_t mod_read(struct file *fd, char __user *buf, size_t nbytes,
-                        loff_t *offset) {
-#ifdef DEBUG
-  printk(KERN_INFO "reading %zu bytes\n", nbytes);
-#endif
+static ssize_t mod_read(struct file *file, char __user *buf, size_t count,
+                        loff_t *ppos) {
+  struct keystroke_result result;
+  unsigned long flags;
 
-  for (int i = 0; i < nbytes; i++) {
-    put_user('A', &(buf[i]));
-  }
-  return nbytes;
+  if (count != sizeof(result))
+    return -EINVAL;
+
+  /* block until a result is in the queue */
+  if (wait_event_interruptible(read_wait_queue, result_count > 0))
+    return -ERESTARTSYS;
+
+  spin_lock_irqsave(&wpm_lock, flags);
+  result = result_queue[result_head];
+  result_head = (result_head + 1) % RESULT_SIZE;
+  result_count--;
+  spin_unlock_irqrestore(&wpm_lock, flags);
+
+  if (copy_to_user(buf, &result, sizeof(result)))
+    return -EFAULT;
+  return sizeof(result);
 }
 
+static unsigned int mod_poll(struct file *file, poll_table *wait) {
+  unsigned int mask = 0;
+  unsigned long flags;
+  poll_wait(file, &read_wait_queue, wait);
+  poll_wait(file, &write_wait_queue, wait);
+  spin_lock_irqsave(&wpm_lock, flags);
+  if (result_count > 0)
+    mask |= POLLIN | POLLRDNORM;
+  if (fifo_count < FIFO_SIZE)
+    mask |= POLLOUT | POLLWRNORM;
+  spin_unlock_irqrestore(&wpm_lock, flags);
+  return mask;
+}
 static int usb_probe(struct usb_interface *intf,
                      const struct usb_device_id *id) {
   printk(KERN_INFO "usb plugged in\n");
@@ -233,8 +257,64 @@ static void wpm_event(struct input_handle *handle, unsigned int type,
 }
 }
 
-static int *wpm_connect(struct input_handler *handler, struct input_dev *dev,
-                        const struct input_device_id *id) {
+static long wpm_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
+  struct wpm_stats stats;
+  unsigned long flags;
+  ktime_t now;
+  s64 em;
+
+  switch (cmd) {
+  case WPM_START:
+    spin_lock_irqsave(&wpm_lock, flags);
+    driver_state = STATE_RUNNING;
+    test_start = ktime_get();
+    spin_unlock_irqrestore(&wpm_lock, flags);
+    return 0;
+
+  case WPM_STOP:
+    spin_lock_irqsave(&wpm_lock, flags);
+    driver_state = STATE_COMPLETE;
+    spin_unlock_irqrestore(&wpm_lock, flags);
+    return 0;
+
+  case WPM_RESET:
+    spin_lock_irqsave(&wpm_lock, flags);
+    fifo_head = fifo_tail = fifo_count = 0;
+    undo_top = result_head = result_tail = result_count = 0;
+    correct_words = missed_words = correct_chars = missed_chars = 0;
+    incorrect_top = 0;
+    in_word = false;
+    driver_state = STATE_IDLE;
+    spin_unlock_irqrestore(&wpm_lock, flags);
+    return 0;
+
+  case WPM_GET_STATS:
+    spin_lock_irqsave(&wpm_lock, flags);
+    now = ktime_get();
+    em = ktime_to_ms(ktime_sub(now, test_start));
+    stats.correct_words = correct_words;
+    stats.missed_words = missed_words;
+    stats.correct_chars = correct_chars;
+    stats.missed_chars = missed_chars;
+    stats.elapsed_seconds = (int)(em / 1000);
+    stats.wpm = em > 0 ? (int)((correct_words * 60000LL) / em) : 0;
+    stats.raw_wpm =
+        em > 0 ? (int)(((correct_words + missed_words) * 60000LL) / em) : 0;
+    spin_unlock_irqrestore(&wpm_lock, flags);
+    if (copy_to_user((void __user *)arg, &stats, sizeof(stats)))
+      return -EFAULT;
+    return 0;
+
+  case WPM_SET_LED:
+    return 0; /* no hardware on this platform */
+
+  default:
+    return -ENOTTY;
+  }
+}
+
+static int wpm_connect(struct input_handler *handler, struct input_dev *dev,
+                       const struct input_device_id *id) {
   struct input_handle *handle, int error;
   handle = kzalloc(sizeof(struct input_handle), GFP_KERNEL);
   if (!handle) {
@@ -293,7 +373,8 @@ static const struct file_operations fops = {
     .read = mod_read,
     .open = mod_open,
     .release = mod_release,
-    .write = wpm_write,
+    .write = mod_write,
+    .poll = mod_poll,
 };
 
 struct usb_device_id usbdid[] = {{USB_DEVICE(0x2e8a, 0x0009)}, {}};
