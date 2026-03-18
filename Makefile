@@ -22,3 +22,6 @@ mod_clean:
 
 fw_clean:
 	rm -rf $(FWBUILD_DIR)
+
+install:
+	sudo cp $(PWD)/udev/* /etc/udev/rules.d/
