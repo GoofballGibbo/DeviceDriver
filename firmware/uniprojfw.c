@@ -32,14 +32,14 @@ int main() {
 
     puts("ping!");
 
-    char buf[4];
-    memset(buf, 0, 4);
+    uint8_t buf[3];
+    memset(buf, 0, 3);
 
     scanf("%*[^\n]\n");
 
     while (1) {
-        fgets(buf, sizeof(buf), stdin);
-        puts(buf); // for debugging
+        fread(buf, 1, 3, stdin);
+
         put_pixel(pio, sm, urgb_u32(buf[1], buf[0], buf[2]));
     }
 }
