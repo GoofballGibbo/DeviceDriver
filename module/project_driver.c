@@ -7,7 +7,7 @@
 
 #define DEBUG // debug prints
 
-#define DEVFILE "/dev/ttyACM0" // terrible solution. if i can do better i will
+#define DEVFILE "/dev/rp2350" // terrible solution. if i can do better i will
 
 MODULE_DESCRIPTION("a driver for a uni project"); // if you don't include this kbuild gets very mad
 MODULE_LICENSE("GPL");                            // same here (why must you force me to use GPL)
@@ -34,7 +34,7 @@ static int write_led(char rgb[3], size_t n) {
     }
 
     if (IS_ERR(usb_fp)) {
-        printk(KERN_ERR "could not open ttyACM0!");
+        printk(KERN_ERR "could not open rp2350!");
         return -ENOENT;
     }
 
@@ -133,7 +133,7 @@ static int usb_probe(struct usb_interface* intf, const struct usb_device_id* id)
                                               // (i hate this solution btw but the usb libraries wer not playing nice with me)
 
     if (!usb_fp || IS_ERR(usb_fp)) {
-        printk(KERN_ERR "could not open ttyACM0!");
+        printk(KERN_ERR "could not open rp2350!");
         return -ENOENT;
     }
 
