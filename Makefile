@@ -1,7 +1,8 @@
-MOD_DIR      := $(PWD)/module
-MODBUILD_DIR := $(MOD_DIR)/build
-FW_DIR       := $(PWD)/firmware
-FWBUILD_DIR  := $(FW_DIR)/build
+MOD_DIR       := $(PWD)/module
+MODBUILD_DIR  := $(MOD_DIR)/build
+FW_DIR        := $(PWD)/firmware
+FWBUILD_DIR   := $(FW_DIR)/build
+PICO_SDK_PATH := $(FW_DIR)/pico-sdk
 
 all: mod fw
 
@@ -21,6 +22,7 @@ mod_clean:
 	rm -rf $(MODBUILD_DIR)
 
 fw_clean:
+	rm -rf $(FW_DIR)/generated
 	rm -rf $(FWBUILD_DIR)
 
 install:
