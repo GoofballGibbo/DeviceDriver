@@ -1,8 +1,16 @@
 #include "asm/uaccess.h"
+#include <ktime.h>
 #include <linux/cdev.h>
+#include <linux/input.h>
+#include <linux/ioctl.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/usb.h>
+#include <linux/wait.h>
 
 #define DEBUG // debug prints
 #define FIFO_SIZE 256
@@ -19,19 +27,21 @@ typedef struct {
   int index;
   char expected;
   char typed;
-  bool has_error;
+  int correct;
 } keystroke_result;
 
 typedef struct {
   int start_index;
   int end_index;
-  int correct;
+  bool has_error;
 } word_entry;
 
 typedef struct {
   int correct_words, missed_words, correct_chars, missed_chars, wpm, raw_wpm,
       elapsed_seconds;
 } wpm_stats;
+
+typedef enum { STATE_IDLE, STATE_RUNNING, STATE_COMPLETE } driver_state_t;
 
 static expected_char undo[UNDO_SIZE];
 static keystroke_result result[RESULT_SIZE];
@@ -173,7 +183,7 @@ static void finalise_word(int index) {
     if (incorrect_top < INCORRECT_MAX) {
       incorrect_stack[incorrect_top++] = current_word;
     }
-    missed_word++;
+    missed_words++;
   } else {
     correct_words++;
   }
@@ -201,7 +211,7 @@ static void wpm_event(struct input_handle *handle, unsigned int type,
   if (code == BACKSPACE) {
     spin_lock_irqsave(&wpm_lock, flags);
     if (undo_top > 0) {
-      expected_char ec = undo_stack[--undo_top];
+      expected_char ec = undo[--undo_top];
       fifo_head = (fifo_head - 1 + FIFO_SIZE) % FIFO_SIZE;
       fifo[fifo_head] = ec;
       fifo_count++;
@@ -368,6 +378,22 @@ static int mod_release(struct inode *inode, struct file *fileptr) {
   return 0;
 }
 
+static int proc_state_show(struct seq_file *m, void *v) {
+  unsigned long flags;
+  spin_lock_irqsave(&wpm_lock, flags);
+  driver_state_t s = driver_state;
+  spin_unlock_irqrestore(&wpm_lock, flags);
+  seq_printf(m, "%s\n",
+             s == STATE_IDLE      ? "IDLE"
+             : s == STATE_RUNNING ? "RUNNING"
+                                  : "COMPLETE");
+  return 0;
+}
+
+static int proc_state_open(struct inode *i, struct file *f) {
+  return single_open(f, proc_state_show, NULL);
+}
+
 static const struct file_operations fops = {
     .owner = THIS_MODULE,
     .read = mod_read,
@@ -418,7 +444,9 @@ static int __init custom_init(void) {
     return -ECANCELED;
   }
 
-  if (usb_register(&usbd) < 0) {
+  proc_create("wpm_state", 0444, NULL, )
+
+      if (usb_register(&usbd) < 0) {
     printk(KERN_ERR "USB registration failed!\n");
     device_destroy(cl, dev);
     cdev_del(&cdev);
