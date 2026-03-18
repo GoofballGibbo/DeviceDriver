@@ -12,6 +12,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
+#include <linux/usb.h>
 #include <linux/wait.h>
 
 MODULE_LICENSE("GPL");
