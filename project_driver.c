@@ -16,9 +16,11 @@
 #include <linux/wait.h>
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("KernelType");
+MODULE_AUTHOR("a group of CS students");
 MODULE_DESCRIPTION("WPM Typing Tester Driver");
-MODULE_VERSION("1.0");
+MODULE_VERSION("0.1.0");
+
+#define DEBUG // debug prints
 
 #define DEVICE_NAME "uniprojdev"
 #define CLASS_NAME "uniprojclass"
@@ -35,26 +37,25 @@ MODULE_VERSION("1.0");
 #define WPM_SET_LED _IOW(WPM_MAGIC, 4, int)
 
 typedef struct {
-  int index;
-  char ch;
+    int index;
+    char ch;
 } expected_char;
 
 typedef struct {
-  int index;
-  char expected;
-  char typed;
-  int correct;
+    int index;
+    char expected;
+    char typed;
+    int correct;
 } keystroke_result;
 
 typedef struct {
-  int start_index;
-  int end_index;
-  bool has_error;
+    int start_index;
+    int end_index;
+    bool has_error;
 } word_entry;
 
 typedef struct {
-  int correct_words, missed_words, correct_chars, missed_chars, wpm, raw_wpm,
-      elapsed_seconds;
+    int correct_words, missed_words, correct_chars, missed_chars, wpm, raw_wpm, elapsed_seconds;
 } wpm_stats;
 
 typedef enum { STATE_IDLE, STATE_RUNNING, STATE_COMPLETE } driver_state_t;
@@ -87,221 +88,197 @@ static DECLARE_WAIT_QUEUE_HEAD(write_wait_queue);
 static int major;
 static dev_t dev;
 static struct cdev cdev;
-static struct class *cl;
+static struct class* cl;
 
 static const char keycode_map[KEY_MAX] = {
-    [KEY_A] = 'a',           [KEY_B] = 'b',         [KEY_C] = 'c',
-    [KEY_D] = 'd',           [KEY_E] = 'e',         [KEY_F] = 'f',
-    [KEY_G] = 'g',           [KEY_H] = 'h',         [KEY_I] = 'i',
-    [KEY_J] = 'j',           [KEY_K] = 'k',         [KEY_L] = 'l',
-    [KEY_M] = 'm',           [KEY_N] = 'n',         [KEY_O] = 'o',
-    [KEY_P] = 'p',           [KEY_Q] = 'q',         [KEY_R] = 'r',
-    [KEY_S] = 's',           [KEY_T] = 't',         [KEY_U] = 'u',
-    [KEY_V] = 'v',           [KEY_W] = 'w',         [KEY_X] = 'x',
-    [KEY_Y] = 'y',           [KEY_Z] = 'z',         [KEY_1] = '1',
-    [KEY_2] = '2',           [KEY_3] = '3',         [KEY_4] = '4',
-    [KEY_5] = '5',           [KEY_6] = '6',         [KEY_7] = '7',
-    [KEY_8] = '8',           [KEY_9] = '9',         [KEY_0] = '0',
-    [KEY_SPACE] = ' ',       [KEY_DOT] = '.',       [KEY_COMMA] = ',',
-    [KEY_APOSTROPHE] = '\'', [KEY_SEMICOLON] = ';',
+    [KEY_A] = 'a', [KEY_B] = 'b', [KEY_C] = 'c', [KEY_D] = 'd',     [KEY_E] = 'e',   [KEY_F] = 'f',     [KEY_G] = 'g',           [KEY_H] = 'h',         [KEY_I] = 'i', [KEY_J] = 'j', [KEY_K] = 'k',
+    [KEY_L] = 'l', [KEY_M] = 'm', [KEY_N] = 'n', [KEY_O] = 'o',     [KEY_P] = 'p',   [KEY_Q] = 'q',     [KEY_R] = 'r',           [KEY_S] = 's',         [KEY_T] = 't', [KEY_U] = 'u', [KEY_V] = 'v',
+    [KEY_W] = 'w', [KEY_X] = 'x', [KEY_Y] = 'y', [KEY_Z] = 'z',     [KEY_1] = '1',   [KEY_2] = '2',     [KEY_3] = '3',           [KEY_4] = '4',         [KEY_5] = '5', [KEY_6] = '6', [KEY_7] = '7',
+    [KEY_8] = '8', [KEY_9] = '9', [KEY_0] = '0', [KEY_SPACE] = ' ', [KEY_DOT] = '.', [KEY_COMMA] = ',', [KEY_APOSTROPHE] = '\'', [KEY_SEMICOLON] = ';',
 };
 static const char keycode_map_shift[KEY_MAX] = {
-    [KEY_A] = 'A',          [KEY_B] = 'B',         [KEY_C] = 'C',
-    [KEY_D] = 'D',          [KEY_E] = 'E',         [KEY_F] = 'F',
-    [KEY_G] = 'G',          [KEY_H] = 'H',         [KEY_I] = 'I',
-    [KEY_J] = 'J',          [KEY_K] = 'K',         [KEY_L] = 'L',
-    [KEY_M] = 'M',          [KEY_N] = 'N',         [KEY_O] = 'O',
-    [KEY_P] = 'P',          [KEY_Q] = 'Q',         [KEY_R] = 'R',
-    [KEY_S] = 'S',          [KEY_T] = 'T',         [KEY_U] = 'U',
-    [KEY_V] = 'V',          [KEY_W] = 'W',         [KEY_X] = 'X',
-    [KEY_Y] = 'Y',          [KEY_Z] = 'Z',         [KEY_1] = '!',
-    [KEY_2] = '@',          [KEY_3] = '#',         [KEY_4] = '$',
-    [KEY_5] = '%',          [KEY_6] = '^',         [KEY_7] = '&',
-    [KEY_8] = '*',          [KEY_9] = '(',         [KEY_0] = ')',
-    [KEY_SPACE] = ' ',      [KEY_DOT] = '>',       [KEY_COMMA] = '<',
-    [KEY_APOSTROPHE] = '"', [KEY_SEMICOLON] = ':',
+    [KEY_A] = 'A', [KEY_B] = 'B', [KEY_C] = 'C', [KEY_D] = 'D',     [KEY_E] = 'E',   [KEY_F] = 'F',     [KEY_G] = 'G',          [KEY_H] = 'H',         [KEY_I] = 'I', [KEY_J] = 'J', [KEY_K] = 'K',
+    [KEY_L] = 'L', [KEY_M] = 'M', [KEY_N] = 'N', [KEY_O] = 'O',     [KEY_P] = 'P',   [KEY_Q] = 'Q',     [KEY_R] = 'R',          [KEY_S] = 'S',         [KEY_T] = 'T', [KEY_U] = 'U', [KEY_V] = 'V',
+    [KEY_W] = 'W', [KEY_X] = 'X', [KEY_Y] = 'Y', [KEY_Z] = 'Z',     [KEY_1] = '!',   [KEY_2] = '@',     [KEY_3] = '#',          [KEY_4] = '$',         [KEY_5] = '%', [KEY_6] = '^', [KEY_7] = '&',
+    [KEY_8] = '*', [KEY_9] = '(', [KEY_0] = ')', [KEY_SPACE] = ' ', [KEY_DOT] = '>', [KEY_COMMA] = '<', [KEY_APOSTROPHE] = '"', [KEY_SEMICOLON] = ':',
 };
 
-static bool is_delimiter(char c) {
-
-  return c == ' ' || c == '\t' || c == '\'' || c == '"';
-}
+static bool is_delimiter(char c) { return c == ' ' || c == '\t' || c == '\'' || c == '"'; }
 
 static void finalise_word(int index) {
-  if (!in_word)
-    return;
-  current_word.end_index = index;
-  if (current_word.has_error) {
-    if (incorrect_top < INCORRECT_MAX)
-      incorrect_stack[incorrect_top++] = current_word;
-    missed_words++;
-  } else {
-    correct_words++;
-  }
-  in_word = false;
-  current_word = (word_entry){0};
+    if (!in_word)
+        return;
+    current_word.end_index = index;
+    if (current_word.has_error) {
+        if (incorrect_top < INCORRECT_MAX)
+            incorrect_stack[incorrect_top++] = current_word;
+        missed_words++;
+    } else {
+        correct_words++;
+    }
+    in_word = false;
+    current_word = (word_entry){0};
 }
 
 static void post_result(int index, char expected, char typed, bool correct) {
-  unsigned long flags;
-  spin_lock_irqsave(&wpm_lock, flags);
-  if (result_count == RESULT_SIZE) {
+    unsigned long flags;
+    spin_lock_irqsave(&wpm_lock, flags);
+    if (result_count == RESULT_SIZE) {
 
-    result_head = (result_head + 1) % RESULT_SIZE;
-    result_count--;
-  }
-  result_queue[result_tail] = (keystroke_result){
-      .index = index,
-      .expected = expected,
-      .typed = typed,
-      .correct = correct ? 1 : 0,
-  };
-  result_tail = (result_tail + 1) % RESULT_SIZE;
-  result_count++;
-  spin_unlock_irqrestore(&wpm_lock, flags);
-  wake_up_interruptible(&read_wait_queue);
+        result_head = (result_head + 1) % RESULT_SIZE;
+        result_count--;
+    }
+    result_queue[result_tail] = (keystroke_result){
+        .index = index,
+        .expected = expected,
+        .typed = typed,
+        .correct = correct ? 1 : 0,
+    };
+    result_tail = (result_tail + 1) % RESULT_SIZE;
+    result_count++;
+    spin_unlock_irqrestore(&wpm_lock, flags);
+    wake_up_interruptible(&read_wait_queue);
 }
 
-static void wpm_event(struct input_handle *handle, unsigned int type,
-                      unsigned int code, int value) {
-  unsigned long flags;
-  char ascii;
+static void wpm_event(struct input_handle* handle, unsigned int type, unsigned int code, int value) {
+    unsigned long flags;
+    char ascii;
 
-  if (type != EV_KEY)
-    return;
+    if (type != EV_KEY)
+        return;
 
-  if (code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT) {
-    shift_held = (value == 1);
-    return;
-  }
-
-  if (value != 1)
-    return;
-
-  spin_lock_irqsave(&wpm_lock, flags);
-
-  if (driver_state != STATE_RUNNING) {
-    spin_unlock_irqrestore(&wpm_lock, flags);
-    return;
-  }
-
-  if (code == KEY_BACKSPACE) {
-    if (undo_top > 0) {
-
-      expected_char ec = undo_stack[--undo_top];
-      fifo_head = (fifo_head - 1 + FIFO_SIZE) % FIFO_SIZE;
-      fifo[fifo_head] = ec;
-      fifo_count++;
-
-      if (correct_chars > 0)
-        correct_chars--;
-      spin_unlock_irqrestore(&wpm_lock, flags);
-
-      post_result(ec.index, ec.ch, '\b', false);
-      wake_up_interruptible(&write_wait_queue);
-    } else {
-      spin_unlock_irqrestore(&wpm_lock, flags);
+    if (code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT) {
+        shift_held = (value == 1);
+        return;
     }
-    return;
-  }
 
-  ascii = shift_held ? keycode_map_shift[code] : keycode_map[code];
-  if (ascii == 0) {
-    spin_unlock_irqrestore(&wpm_lock, flags);
-    return;
-  }
+    if (value != 1)
+        return;
 
-  if (fifo_count == 0) {
-    spin_unlock_irqrestore(&wpm_lock, flags);
-    return;
-  }
+    spin_lock_irqsave(&wpm_lock, flags);
 
-  expected_char expected = fifo[fifo_head];
+    if (driver_state != STATE_RUNNING) {
+        spin_unlock_irqrestore(&wpm_lock, flags);
+        return;
+    }
 
-  if (ascii == expected.ch) {
+    if (code == KEY_BACKSPACE) {
+        if (undo_top > 0) {
 
-    fifo_head = (fifo_head + 1) % FIFO_SIZE;
-    fifo_count--;
-    undo_stack[undo_top % UNDO_SIZE] = expected;
-    if (undo_top < UNDO_SIZE)
-      undo_top++;
+            expected_char ec = undo_stack[--undo_top];
+            fifo_head = (fifo_head - 1 + FIFO_SIZE) % FIFO_SIZE;
+            fifo[fifo_head] = ec;
+            fifo_count++;
 
-    correct_chars++;
+            if (correct_chars > 0)
+                correct_chars--;
+            spin_unlock_irqrestore(&wpm_lock, flags);
 
-    if (correct_chars == 1)
-      test_start = ktime_get();
+            post_result(ec.index, ec.ch, '\b', false);
+            wake_up_interruptible(&write_wait_queue);
+        } else {
+            spin_unlock_irqrestore(&wpm_lock, flags);
+        }
+        return;
+    }
 
-    if (is_delimiter(ascii)) {
-      finalise_word(expected.index);
-    } else if (!in_word) {
-      in_word = true;
-      current_word.start_index = expected.index;
-      current_word.has_error = false;
+    ascii = shift_held ? keycode_map_shift[code] : keycode_map[code];
+    if (ascii == 0) {
+        spin_unlock_irqrestore(&wpm_lock, flags);
+        return;
     }
 
     if (fifo_count == 0) {
-      finalise_word(expected.index);
-      driver_state = STATE_COMPLETE;
+        spin_unlock_irqrestore(&wpm_lock, flags);
+        return;
     }
 
-    spin_unlock_irqrestore(&wpm_lock, flags);
+    expected_char expected = fifo[fifo_head];
 
-    post_result(expected.index, expected.ch, ascii, true);
-    wake_up_interruptible(&write_wait_queue);
+    if (ascii == expected.ch) {
 
-  } else {
+        fifo_head = (fifo_head + 1) % FIFO_SIZE;
+        fifo_count--;
+        undo_stack[undo_top % UNDO_SIZE] = expected;
+        if (undo_top < UNDO_SIZE)
+            undo_top++;
 
-    missed_chars++;
-    current_word.has_error = true;
-    spin_unlock_irqrestore(&wpm_lock, flags);
+        correct_chars++;
 
-    post_result(expected.index, expected.ch, ascii, false);
-  }
+        if (correct_chars == 1)
+            test_start = ktime_get();
+
+        if (is_delimiter(ascii)) {
+            finalise_word(expected.index);
+        } else if (!in_word) {
+            in_word = true;
+            current_word.start_index = expected.index;
+            current_word.has_error = false;
+        }
+
+        if (fifo_count == 0) {
+            finalise_word(expected.index);
+            driver_state = STATE_COMPLETE;
+        }
+
+        spin_unlock_irqrestore(&wpm_lock, flags);
+
+        post_result(expected.index, expected.ch, ascii, true);
+        wake_up_interruptible(&write_wait_queue);
+
+    } else {
+
+        missed_chars++;
+        current_word.has_error = true;
+        spin_unlock_irqrestore(&wpm_lock, flags);
+
+        post_result(expected.index, expected.ch, ascii, false);
+    }
 }
 
-static int wpm_connect(struct input_handler *handler, struct input_dev *dev,
-                       const struct input_device_id *id) {
-  struct input_handle *handle;
-  int error;
+static int wpm_connect(struct input_handler* handler, struct input_dev* dev, const struct input_device_id* id) {
+    struct input_handle* handle;
+    int error;
 
-  if (dev->id.bustype == BUS_VIRTUAL)
-    return -ENODEV;
-  if (!test_bit(KEY_A, dev->keybit) || !test_bit(KEY_SPACE, dev->keybit))
-    return -ENODEV;
+    if (dev->id.bustype == BUS_VIRTUAL)
+        return -ENODEV;
+    if (!test_bit(KEY_A, dev->keybit) || !test_bit(KEY_SPACE, dev->keybit))
+        return -ENODEV;
 
-  handle = kzalloc(sizeof(struct input_handle), GFP_KERNEL);
-  if (!handle)
-    return -ENOMEM;
+    handle = kzalloc(sizeof(struct input_handle), GFP_KERNEL);
+    if (!handle)
+        return -ENOMEM;
 
-  handle->dev = dev;
-  handle->handler = handler;
-  handle->name = "wpm_driver";
+    handle->dev = dev;
+    handle->handler = handler;
+    handle->name = "wpm_driver";
 
-  error = input_register_handle(handle);
-  if (error) {
-    kfree(handle);
-    return error;
-  }
+    error = input_register_handle(handle);
+    if (error) {
+        kfree(handle);
+        return error;
+    }
 
-  error = input_open_device(handle);
-  if (error) {
+    error = input_open_device(handle);
+    if (error) {
+        input_unregister_handle(handle);
+        kfree(handle);
+        return error;
+    }
+
+#ifdef DEBUG
+    printk(KERN_INFO "wpm_driver: connected to %s\n", dev->name ? dev->name : "?");
+#endif
+    return 0;
+}
+
+static void wpm_disconnect(struct input_handle* handle) {
+    input_close_device(handle);
     input_unregister_handle(handle);
     kfree(handle);
-    return error;
-  }
-
-  pr_info("wpm_driver: connected to %s\n", dev->name ? dev->name : "?");
-  return 0;
 }
 
-static void wpm_disconnect(struct input_handle *handle) {
-  input_close_device(handle);
-  input_unregister_handle(handle);
-  kfree(handle);
-}
-
-static const struct input_device_id wpm_ids[] = {
-    {.flags = INPUT_DEVICE_ID_MATCH_EVBIT, .evbit = {BIT_MASK(EV_KEY)}}, {}};
+static const struct input_device_id wpm_ids[] = {{.flags = INPUT_DEVICE_ID_MATCH_EVBIT, .evbit = {BIT_MASK(EV_KEY)}}, {}};
 
 static struct input_handler wpm_input_handler = {
     .event = wpm_event,
@@ -311,206 +288,193 @@ static struct input_handler wpm_input_handler = {
     .id_table = wpm_ids,
 };
 
-static int mod_open(struct inode *inode, struct file *fileptr) {
-  pr_info("wpm_driver: opened (major=%d minor=%d)\n", imajor(inode),
-          iminor(inode));
-  return 0;
+static int mod_open(struct inode* inode, struct file* fileptr) {
+#ifdef DEBUG
+    printk(KERN_INFO "wpm_driver: opened (major=%d minor=%d)\n", imajor(inode), iminor(inode));
+#endif
+    return 0;
 }
 
-static int mod_release(struct inode *inode, struct file *fileptr) {
-  pr_info("wpm_driver: closed\n");
-  return 0;
+static int mod_release(struct inode* inode, struct file* fileptr) {
+#ifdef DEBUG
+    printk(KERN_INFO "wpm_driver: closed\n");
+#endif
+    return 0;
 }
 
-static ssize_t mod_write(struct file *file, const char __user *user_buf,
-                         size_t len, loff_t *off) {
-  expected_char ec;
-  unsigned long flags;
+static ssize_t mod_write(struct file* file, const char __user* user_buf, size_t len, loff_t* off) {
+    expected_char ec;
+    unsigned long flags;
 
-  if (len != sizeof(expected_char))
-    return -EINVAL;
-  if (copy_from_user(&ec, user_buf, sizeof(expected_char)))
-    return -EFAULT;
+    if (len != sizeof(expected_char))
+        return -EINVAL;
+    if (copy_from_user(&ec, user_buf, sizeof(expected_char)))
+        return -EFAULT;
 
-  if (wait_event_interruptible(write_wait_queue, fifo_count < FIFO_SIZE))
-    return -ERESTARTSYS;
+    if (wait_event_interruptible(write_wait_queue, fifo_count < FIFO_SIZE))
+        return -ERESTARTSYS;
 
-  spin_lock_irqsave(&wpm_lock, flags);
-  fifo[fifo_tail] = ec;
-  fifo_tail = (fifo_tail + 1) % FIFO_SIZE;
-  fifo_count++;
-  spin_unlock_irqrestore(&wpm_lock, flags);
-
-  wake_up_interruptible(&read_wait_queue);
-  return sizeof(expected_char);
-}
-
-static ssize_t mod_read(struct file *file, char __user *buf, size_t count,
-                        loff_t *ppos) {
-  keystroke_result res;
-  unsigned long flags;
-
-  if (count != sizeof(res))
-    return -EINVAL;
-
-  if (wait_event_interruptible(read_wait_queue, result_count > 0))
-    return -ERESTARTSYS;
-
-  spin_lock_irqsave(&wpm_lock, flags);
-  res = result_queue[result_head];
-  result_head = (result_head + 1) % RESULT_SIZE;
-  result_count--;
-  spin_unlock_irqrestore(&wpm_lock, flags);
-
-  if (copy_to_user(buf, &res, sizeof(res)))
-    return -EFAULT;
-  return sizeof(res);
-}
-
-static unsigned int mod_poll(struct file *file, poll_table *wait) {
-  unsigned int mask = 0;
-  unsigned long flags;
-  poll_wait(file, &read_wait_queue, wait);
-  poll_wait(file, &write_wait_queue, wait);
-  spin_lock_irqsave(&wpm_lock, flags);
-  if (result_count > 0)
-    mask |= POLLIN | POLLRDNORM;
-  if (fifo_count < FIFO_SIZE)
-    mask |= POLLOUT | POLLWRNORM;
-  spin_unlock_irqrestore(&wpm_lock, flags);
-  return mask;
-}
-
-static long wpm_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
-  wpm_stats stats;
-  unsigned long flags;
-  ktime_t now;
-  s64 em;
-
-  switch (cmd) {
-  case WPM_START:
     spin_lock_irqsave(&wpm_lock, flags);
-    driver_state = STATE_RUNNING;
-    test_start = ktime_get();
+    fifo[fifo_tail] = ec;
+    fifo_tail = (fifo_tail + 1) % FIFO_SIZE;
+    fifo_count++;
     spin_unlock_irqrestore(&wpm_lock, flags);
-    return 0;
 
-  case WPM_STOP:
+    wake_up_interruptible(&read_wait_queue);
+    return sizeof(expected_char);
+}
+
+static ssize_t mod_read(struct file* file, char __user* buf, size_t count, loff_t* ppos) {
+    keystroke_result res;
+    unsigned long flags;
+
+    if (count != sizeof(res))
+        return -EINVAL;
+
+    if (wait_event_interruptible(read_wait_queue, result_count > 0))
+        return -ERESTARTSYS;
+
     spin_lock_irqsave(&wpm_lock, flags);
-    driver_state = STATE_COMPLETE;
+    res = result_queue[result_head];
+    result_head = (result_head + 1) % RESULT_SIZE;
+    result_count--;
     spin_unlock_irqrestore(&wpm_lock, flags);
-    return 0;
 
-  case WPM_RESET:
+    if (copy_to_user(buf, &res, sizeof(res)))
+        return -EFAULT;
+    return sizeof(res);
+}
+
+static unsigned int mod_poll(struct file* file, poll_table* wait) {
+    unsigned int mask = 0;
+    unsigned long flags;
+    poll_wait(file, &read_wait_queue, wait);
+    poll_wait(file, &write_wait_queue, wait);
     spin_lock_irqsave(&wpm_lock, flags);
-    fifo_head = fifo_tail = fifo_count = 0;
-    undo_top = result_head = result_tail = result_count = 0;
-    correct_words = missed_words = correct_chars = missed_chars = 0;
-    incorrect_top = 0;
-    in_word = false;
-    driver_state = STATE_IDLE;
+    if (result_count > 0)
+        mask |= POLLIN | POLLRDNORM;
+    if (fifo_count < FIFO_SIZE)
+        mask |= POLLOUT | POLLWRNORM;
     spin_unlock_irqrestore(&wpm_lock, flags);
-    return 0;
+    return mask;
+}
 
-  case WPM_GET_STATS:
+static long wpm_ioctl(struct file* file, unsigned int cmd, unsigned long arg) {
+    wpm_stats stats;
+    unsigned long flags;
+    ktime_t now;
+    s64 em;
+
+    switch (cmd) {
+    case WPM_START:
+        spin_lock_irqsave(&wpm_lock, flags);
+        driver_state = STATE_RUNNING;
+        test_start = ktime_get();
+        spin_unlock_irqrestore(&wpm_lock, flags);
+        return 0;
+
+    case WPM_STOP:
+        spin_lock_irqsave(&wpm_lock, flags);
+        driver_state = STATE_COMPLETE;
+        spin_unlock_irqrestore(&wpm_lock, flags);
+        return 0;
+
+    case WPM_RESET:
+        spin_lock_irqsave(&wpm_lock, flags);
+        fifo_head = fifo_tail = fifo_count = 0;
+        undo_top = result_head = result_tail = result_count = 0;
+        correct_words = missed_words = correct_chars = missed_chars = 0;
+        incorrect_top = 0;
+        in_word = false;
+        driver_state = STATE_IDLE;
+        spin_unlock_irqrestore(&wpm_lock, flags);
+        return 0;
+
+    case WPM_GET_STATS:
+        spin_lock_irqsave(&wpm_lock, flags);
+        now = ktime_get();
+        em = ktime_to_ms(ktime_sub(now, test_start));
+        stats.correct_words = correct_words;
+        stats.missed_words = missed_words;
+        stats.correct_chars = correct_chars;
+        stats.missed_chars = missed_chars;
+        stats.elapsed_seconds = (int)(em / 1000);
+        stats.wpm = em > 0 ? (int)((correct_words * 60000LL) / em) : 0;
+        stats.raw_wpm = em > 0 ? (int)(((correct_words + missed_words) * 60000LL) / em) : 0;
+        spin_unlock_irqrestore(&wpm_lock, flags);
+        if (copy_to_user((void __user*)arg, &stats, sizeof(stats)))
+            return -EFAULT;
+        return 0;
+
+    case WPM_SET_LED:
+        return 0;
+
+    default:
+        return -ENOTTY;
+    }
+}
+
+static int proc_state_show(struct seq_file* m, void* v) {
+    unsigned long flags;
     spin_lock_irqsave(&wpm_lock, flags);
-    now = ktime_get();
-    em = ktime_to_ms(ktime_sub(now, test_start));
-    stats.correct_words = correct_words;
-    stats.missed_words = missed_words;
-    stats.correct_chars = correct_chars;
-    stats.missed_chars = missed_chars;
-    stats.elapsed_seconds = (int)(em / 1000);
-    stats.wpm = em > 0 ? (int)((correct_words * 60000LL) / em) : 0;
-    stats.raw_wpm =
-        em > 0 ? (int)(((correct_words + missed_words) * 60000LL) / em) : 0;
+    driver_state_t s = driver_state;
     spin_unlock_irqrestore(&wpm_lock, flags);
-    if (copy_to_user((void __user *)arg, &stats, sizeof(stats)))
-      return -EFAULT;
+    seq_printf(m, "%s\n", s == STATE_IDLE ? "IDLE" : s == STATE_RUNNING ? "RUNNING" : "COMPLETE");
     return 0;
+}
 
-  case WPM_SET_LED:
+static int proc_state_open(struct inode* inode, struct file* file) { return single_open(file, proc_state_show, NULL); }
+
+static int proc_stats_show(struct seq_file* m, void* v) {
+    unsigned long flags;
+    int cw, mw, cc, mc;
+    s64 em;
+    driver_state_t s;
+
+    spin_lock_irqsave(&wpm_lock, flags);
+    cw = correct_words;
+    mw = missed_words;
+    cc = correct_chars;
+    mc = missed_chars;
+    em = ktime_to_ms(ktime_sub(ktime_get(), test_start));
+    s = driver_state;
+    spin_unlock_irqrestore(&wpm_lock, flags);
+
+    int tw = cw + mw, tc = cc + mc;
+    int wpm = em > 0 ? (int)((cw * 60000LL) / em) : 0;
+    int raw_wpm = em > 0 ? (int)(((cw + mw) * 60000LL) / em) : 0;
+
+    seq_printf(m, "state:           %s\n", s == STATE_IDLE ? "IDLE" : s == STATE_RUNNING ? "RUNNING" : "COMPLETE");
+    seq_printf(m, "wpm:             %d\n", wpm);
+    seq_printf(m, "raw_wpm:         %d\n", raw_wpm);
+    seq_printf(m, "word_accuracy:   %d%%\n", tw > 0 ? (cw * 100) / tw : 0);
+    seq_printf(m, "char_accuracy:   %d%%\n", tc > 0 ? (cc * 100) / tc : 0);
+    seq_printf(m, "correct_words:   %d\n", cw);
+    seq_printf(m, "missed_words:    %d\n", mw);
+    seq_printf(m, "correct_chars:   %d\n", cc);
+    seq_printf(m, "missed_chars:    %d\n", mc);
+    seq_printf(m, "elapsed_seconds: %lld\n", em / 1000);
     return 0;
-
-  default:
-    return -ENOTTY;
-  }
 }
 
-static int proc_state_show(struct seq_file *m, void *v) {
-  unsigned long flags;
-  spin_lock_irqsave(&wpm_lock, flags);
-  driver_state_t s = driver_state;
-  spin_unlock_irqrestore(&wpm_lock, flags);
-  seq_printf(m, "%s\n",
-             s == STATE_IDLE      ? "IDLE"
-             : s == STATE_RUNNING ? "RUNNING"
-                                  : "COMPLETE");
-  return 0;
+static int proc_stats_open(struct inode* inode, struct file* file) { return single_open(file, proc_stats_show, NULL); }
+
+static int proc_errors_show(struct seq_file* m, void* v) {
+    unsigned long flags;
+    int i, top;
+    word_entry local[INCORRECT_MAX];
+
+    spin_lock_irqsave(&wpm_lock, flags);
+    top = incorrect_top;
+    memcpy(local, incorrect_stack, top * sizeof(word_entry));
+    spin_unlock_irqrestore(&wpm_lock, flags);
+
+    for (i = 0; i < top; i++)
+        seq_printf(m, "%d:%d\n", local[i].start_index, local[i].end_index);
+    return 0;
 }
 
-static int proc_state_open(struct inode *inode, struct file *file) {
-
-  return single_open(file, proc_state_show, NULL);
-}
-
-static int proc_stats_show(struct seq_file *m, void *v) {
-  unsigned long flags;
-  int cw, mw, cc, mc;
-  s64 em;
-  driver_state_t s;
-
-  spin_lock_irqsave(&wpm_lock, flags);
-  cw = correct_words;
-  mw = missed_words;
-  cc = correct_chars;
-  mc = missed_chars;
-  em = ktime_to_ms(ktime_sub(ktime_get(), test_start));
-  s = driver_state;
-  spin_unlock_irqrestore(&wpm_lock, flags);
-
-  int tw = cw + mw, tc = cc + mc;
-  int wpm = em > 0 ? (int)((cw * 60000LL) / em) : 0;
-  int raw_wpm = em > 0 ? (int)(((cw + mw) * 60000LL) / em) : 0;
-
-  seq_printf(m, "state:           %s\n",
-             s == STATE_IDLE      ? "IDLE"
-             : s == STATE_RUNNING ? "RUNNING"
-                                  : "COMPLETE");
-  seq_printf(m, "wpm:             %d\n", wpm);
-  seq_printf(m, "raw_wpm:         %d\n", raw_wpm);
-  seq_printf(m, "word_accuracy:   %d%%\n", tw > 0 ? (cw * 100) / tw : 0);
-  seq_printf(m, "char_accuracy:   %d%%\n", tc > 0 ? (cc * 100) / tc : 0);
-  seq_printf(m, "correct_words:   %d\n", cw);
-  seq_printf(m, "missed_words:    %d\n", mw);
-  seq_printf(m, "correct_chars:   %d\n", cc);
-  seq_printf(m, "missed_chars:    %d\n", mc);
-  seq_printf(m, "elapsed_seconds: %lld\n", em / 1000);
-  return 0;
-}
-
-static int proc_stats_open(struct inode *inode, struct file *file) {
-  return single_open(file, proc_stats_show, NULL);
-}
-
-static int proc_errors_show(struct seq_file *m, void *v) {
-  unsigned long flags;
-  int i, top;
-  word_entry local[INCORRECT_MAX];
-
-  spin_lock_irqsave(&wpm_lock, flags);
-  top = incorrect_top;
-  memcpy(local, incorrect_stack, top * sizeof(word_entry));
-  spin_unlock_irqrestore(&wpm_lock, flags);
-
-  for (i = 0; i < top; i++)
-    seq_printf(m, "%d:%d\n", local[i].start_index, local[i].end_index);
-  return 0;
-}
-
-static int proc_errors_open(struct inode *inode, struct file *file) {
-  return single_open(file, proc_errors_show, NULL);
-}
+static int proc_errors_open(struct inode* inode, struct file* file) { return single_open(file, proc_errors_show, NULL); }
 
 static const struct proc_ops proc_state_fops = {
     .proc_open = proc_state_open,
@@ -543,14 +507,17 @@ static const struct file_operations fops = {
     .unlocked_ioctl = wpm_ioctl,
 };
 
-static int usb_probe(struct usb_interface *intf,
-                     const struct usb_device_id *id) {
-  printk(KERN_INFO "usb plugged in\n");
-  return 0;
+static int usb_probe(struct usb_interface* intf, const struct usb_device_id* id) {
+#ifdef DEBUG
+    printk(KERN_INFO "usb plugged in\n");
+#endif
+    return 0;
 }
 
-static void usb_dc(struct usb_interface *intf) {
-  printk(KERN_INFO "disconnecting usb\n");
+static void usb_dc(struct usb_interface* intf) {
+#ifdef DEBUG
+    printk(KERN_INFO "disconnecting usb\n");
+#endif
 }
 
 static struct usb_device_id usbdid[] = {{USB_DEVICE(0x2e8a, 0x0009)}, {}};
@@ -563,54 +530,75 @@ static struct usb_driver usbd = {
 };
 
 static int __init custom_init(void) {
-  int ret;
+    int ret;
 
-  if (alloc_chrdev_region(&dev, 0, 1, "uniproject")) {
-    pr_err("device allocation failed\n");
-    return -ECANCELED;
-  }
+    if (alloc_chrdev_region(&dev, 0, 1, "uniproject")) {
+        printk(KERN_ERR "device allocation failed\n");
+        return -ECANCELED;
+    }
 
-  if (!(cl = class_create("uniprojclass"))) {
-    pr_err("class creation failed\n");
-    unregister_chrdev_region(dev, 1);
-    return -ECANCELED;
-  }
+    if (!(cl = class_create("uniprojclass"))) {
+        printk(KERN_ERR "class creation failed\n");
+        unregister_chrdev_region(dev, 1);
+        return -ECANCELED;
+    }
 
-  cdev_init(&cdev, &fops);
-  if (cdev_add(&cdev, dev, 1) < 0) {
-    pr_err("chardevice init failed\n");
-    class_destroy(cl);
-    unregister_chrdev_region(dev, 1);
-    return -ECANCELED;
-  }
+    cdev_init(&cdev, &fops);
+    if (cdev_add(&cdev, dev, 1) < 0) {
+        printk(KERN_ERR "chardevice init failed\n");
+        class_destroy(cl);
+        unregister_chrdev_region(dev, 1);
+        return -ECANCELED;
+    }
 
-  if (!device_create(cl, NULL, dev, NULL, "uniprojdev")) {
-    pr_err("device creation failed\n");
-    cdev_del(&cdev);
-    class_destroy(cl);
-    unregister_chrdev_region(dev, 1);
-    return -ECANCELED;
-  }
+    if (!device_create(cl, NULL, dev, NULL, "uniprojdev")) {
+        printk(KERN_ERR "device creation failed\n");
+        cdev_del(&cdev);
+        class_destroy(cl);
+        unregister_chrdev_region(dev, 1);
+        return -ECANCELED;
+    }
 
-  proc_create("wpm_state", 0444, NULL, &proc_state_fops);
-  proc_create("wpm_stats", 0444, NULL, &proc_stats_fops);
-  proc_create("wpm_errors", 0444, NULL, &proc_errors_fops);
+    proc_create("wpm_state", 0444, NULL, &proc_state_fops);
+    proc_create("wpm_stats", 0444, NULL, &proc_stats_fops);
+    proc_create("wpm_errors", 0444, NULL, &proc_errors_fops);
 
-  ret = input_register_handler(&wpm_input_handler);
-  if (ret) {
-    pr_err("input_register_handler failed: %d\n", ret);
-    remove_proc_entry("wpm_state", NULL);
-    remove_proc_entry("wpm_stats", NULL);
-    remove_proc_entry("wpm_errors", NULL);
-    device_destroy(cl, dev);
-    cdev_del(&cdev);
-    class_destroy(cl);
-    unregister_chrdev_region(dev, 1);
-    return ret;
-  }
+    ret = input_register_handler(&wpm_input_handler);
+    if (ret) {
+        printk(KERN_ERR "input_register_handler failed: %d\n", ret);
+        remove_proc_entry("wpm_state", NULL);
+        remove_proc_entry("wpm_stats", NULL);
+        remove_proc_entry("wpm_errors", NULL);
+        device_destroy(cl, dev);
+        cdev_del(&cdev);
+        class_destroy(cl);
+        unregister_chrdev_region(dev, 1);
+        return ret;
+    }
 
-  if (usb_register(&usbd) < 0) {
-    pr_err("USB registration failed\n");
+    if (usb_register(&usbd) < 0) {
+        printk(KERN_ERR "USB registration failed\n");
+        input_unregister_handler(&wpm_input_handler);
+        remove_proc_entry("wpm_state", NULL);
+        remove_proc_entry("wpm_stats", NULL);
+        remove_proc_entry("wpm_errors", NULL);
+        device_destroy(cl, dev);
+        cdev_del(&cdev);
+        class_destroy(cl);
+        unregister_chrdev_region(dev, 1);
+        return -ECANCELED;
+    }
+
+    major = MAJOR(dev);
+#ifdef DEBUG
+    printk(KERN_INFO "wpm_driver: loaded (major=%d)\n", major);
+#endif
+    return 0;
+}
+
+static void __exit custom_exit(void) {
+    usb_deregister(&usbd);
+
     input_unregister_handler(&wpm_input_handler);
     remove_proc_entry("wpm_state", NULL);
     remove_proc_entry("wpm_stats", NULL);
@@ -619,26 +607,9 @@ static int __init custom_init(void) {
     cdev_del(&cdev);
     class_destroy(cl);
     unregister_chrdev_region(dev, 1);
-    return -ECANCELED;
-  }
-
-  major = MAJOR(dev);
-  pr_info("wpm_driver: loaded (major=%d)\n", major);
-  return 0;
-}
-
-static void __exit custom_exit(void) {
-  usb_deregister(&usbd);
-
-  input_unregister_handler(&wpm_input_handler);
-  remove_proc_entry("wpm_state", NULL);
-  remove_proc_entry("wpm_stats", NULL);
-  remove_proc_entry("wpm_errors", NULL);
-  device_destroy(cl, dev);
-  cdev_del(&cdev);
-  class_destroy(cl);
-  unregister_chrdev_region(dev, 1);
-  pr_info("wpm_driver: unloaded\n");
+#ifdef DEBUG
+    printk(KERN_INFO "wpm_driver: unloaded\n");
+#endif
 }
 
 module_init(custom_init);

@@ -1,15 +1,9 @@
 # built files
 build
 
-*.o
-*.out
-*.exe
-test1
-WPMTest
-testio
-ioctl
-test
-testblock
+/Test/*
+!/Test/*.c
+
 # clangd config
 .cache
 .clangd
