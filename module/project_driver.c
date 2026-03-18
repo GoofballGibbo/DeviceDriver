@@ -28,7 +28,7 @@ MODULE_VERSION("0.1.0");
 #define DEVICE_NAME "uniprojdev"
 #define CLASS_NAME "uniprojclass"
 #define FIFO_SIZE 256
-#define UNDO_SIZE 64
+#define UNDO_SIZE 256
 #define RESULT_SIZE 64
 #define INCORRECT_MAX 128
 
@@ -182,14 +182,14 @@ static ssize_t mod_write(struct file* fd, const char __user* buf, size_t nbytes,
 
 static int mod_open(struct inode* inode, struct file* fileptr) {
 #ifdef DEBUG
-    printk(KERN_INFO "wpm_driver: opened (major=%d minor=%d)\n", imajor(inode), iminor(inode));
+    printk(KERN_INFO "uniprojdev: opened (major=%d minor=%d)\n", imajor(inode), iminor(inode));
 #endif
     return 0;
 }
 
 static int mod_release(struct inode* inode, struct file* fileptr) {
 #ifdef DEBUG
-    printk(KERN_INFO "wpm_driver: closed\n");
+    printk(KERN_INFO "uniprojdev: closed\n");
 #endif
     return 0;
 }
@@ -244,6 +244,16 @@ static void post_result(int index, char expected, char typed, bool correct) {
     result_count++;
     spin_unlock_irqrestore(&wpm_lock, flags);
     wake_up_interruptible(&read_wait_queue);
+    if (typed == '/b') {
+        char off[3] = [ 0, 0, 0 ];
+        write_led(off, 3);
+    } else if (correct) {
+        char green[3] = [ 0, 255, 0 ];
+        write_led(green, 3);
+    } else {
+        char red[3] = [ 255, 0, 0 ];
+        write_led(red, 3);
+    }
 }
 
 
@@ -271,8 +281,8 @@ static void wpm_event(struct input_handle* handle, unsigned int type, unsigned i
 
     if (code == KEY_BACKSPACE) {
         if (undo_top > 0) {
-
-            expected_char ec = undo_stack[--undo_top];
+            undo_top--;
+            expected_char ec = undo_stack[undo_top % UNDO_SIZE];
             fifo_head = (fifo_head - 1 + FIFO_SIZE) % FIFO_SIZE;
             fifo[fifo_head] = ec;
             fifo_count++;
@@ -307,8 +317,10 @@ static void wpm_event(struct input_handle* handle, unsigned int type, unsigned i
         fifo_head = (fifo_head + 1) % FIFO_SIZE;
         fifo_count--;
         undo_stack[undo_top % UNDO_SIZE] = expected;
-        if (undo_top < UNDO_SIZE)
+        if (undo_top < UNDO_SIZE) {
             undo_top++;
+        }
+
 
         correct_chars++;
 
@@ -358,7 +370,7 @@ static int wpm_connect(struct input_handler* handler, struct input_dev* dev, con
 
     handle->dev = dev;
     handle->handler = handler;
-    handle->name = "wpm_driver";
+    handle->name = "uniprojdev";
 
     error = input_register_handle(handle);
     if (error) {
@@ -374,7 +386,7 @@ static int wpm_connect(struct input_handler* handler, struct input_dev* dev, con
     }
 
 #ifdef DEBUG
-    printk(KERN_INFO "wpm_driver: connected to %s\n", dev->name ? dev->name : "?");
+    printk(KERN_INFO "uniprojdev: connected to %s\n", dev->name ? dev->name : "?");
 #endif
     return 0;
 }
@@ -391,7 +403,7 @@ static struct input_handler wpm_input_handler = {
     .event = wpm_event,
     .connect = wpm_connect,
     .disconnect = wpm_disconnect,
-    .name = "wpm_driver",
+    .name = "uniprojdev",
     .id_table = wpm_ids,
 };
 
@@ -660,7 +672,7 @@ static int __init custom_init(void) {
 
     major = MAJOR(dev);
 #ifdef DEBUG
-    printk(KERN_INFO "wpm_driver: loaded (major=%d)\n", major);
+    printk(KERN_INFO "uniprojdev: loaded (major=%d)\n", major);
 #endif
     return 0;
 }
@@ -682,7 +694,7 @@ static void __exit custom_exit(void) {
     }
 
 #ifdef DEBUG
-    printk(KERN_INFO "wpm_driver: unloaded\n");
+    printk(KERN_INFO "uniprojdev: unloaded\n");
 #endif
 }
 
