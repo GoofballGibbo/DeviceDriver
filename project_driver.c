@@ -1,22 +1,37 @@
-#include "asm/uaccess.h"
-#include <ktime.h>
 #include <linux/cdev.h>
+#include <linux/fs.h>
+#include <linux/init.h>
 #include <linux/input.h>
 #include <linux/ioctl.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
+#include <linux/poll.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
-#include <linux/usb.h>
+#include <linux/uaccess.h>
 #include <linux/wait.h>
 
-#define DEBUG // debug prints
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("KernelType");
+MODULE_DESCRIPTION("WPM Typing Tester Driver");
+MODULE_VERSION("1.0");
+
+#define DEVICE_NAME "uniprojdev"
+#define CLASS_NAME "uniprojclass"
 #define FIFO_SIZE 256
-#define INCORRECT_MAX 128
 #define UNDO_SIZE 64
 #define RESULT_SIZE 64
+#define INCORRECT_MAX 128
+
+#define WPM_MAGIC 'W'
+#define WPM_START _IO(WPM_MAGIC, 0)
+#define WPM_STOP _IO(WPM_MAGIC, 1)
+#define WPM_RESET _IO(WPM_MAGIC, 2)
+#define WPM_GET_STATS _IOR(WPM_MAGIC, 3, wpm_stats)
+#define WPM_SET_LED _IOW(WPM_MAGIC, 4, int)
 
 typedef struct {
   int index;
@@ -43,17 +58,35 @@ typedef struct {
 
 typedef enum { STATE_IDLE, STATE_RUNNING, STATE_COMPLETE } driver_state_t;
 
-static expected_char undo[UNDO_SIZE];
-static keystroke_result result[RESULT_SIZE];
+static driver_state_t driver_state = STATE_IDLE;
+static ktime_t test_start;
+static int correct_words = 0, missed_words = 0;
+static int correct_chars = 0, missed_chars = 0;
+
+static expected_char undo_stack[UNDO_SIZE];
+static int undo_top = 0;
+
+static keystroke_result result_queue[RESULT_SIZE];
 static int result_head = 0, result_tail = 0, result_count = 0;
+
+static expected_char fifo[FIFO_SIZE];
+static int fifo_head = 0, fifo_tail = 0, fifo_count = 0;
+
 static word_entry current_word = {0};
-static bool in_word = false, shift_held = false;
+static bool in_word = false;
+static bool shift_held = false;
+
 static word_entry incorrect_stack[INCORRECT_MAX];
 static int incorrect_top = 0;
-static expected_char fifo[FIFO_SIZE];
-static int fifo_head = 0;
-static int fifo_tail = 0;
-static int fifo_count = 0;
+
+static DEFINE_SPINLOCK(wpm_lock);
+static DECLARE_WAIT_QUEUE_HEAD(read_wait_queue);
+static DECLARE_WAIT_QUEUE_HEAD(write_wait_queue);
+
+static int major;
+static dev_t dev;
+static struct cdev cdev;
+static struct class *cl;
 
 static const char keycode_map[KEY_MAX] = {
     [KEY_A] = 'a',           [KEY_B] = 'b',         [KEY_C] = 'c',
@@ -88,67 +121,249 @@ static const char keycode_map_shift[KEY_MAX] = {
     [KEY_APOSTROPHE] = '"', [KEY_SEMICOLON] = ':',
 };
 
-/* AI generated Scancode coversion */
+static bool is_delimiter(char c) {
 
-static DEFINE_SPINLOCK(wpm_lock);
-static DECLARE_WAIT_QUEUE_HEAD(read_wait_queue);
-static DECLARE_WAIT_QUEUE_HEAD(write_wait_queue);
+  return c == ' ' || c == '\t' || c == '\'' || c == '"';
+}
+
+static void finalise_word(int index) {
+  if (!in_word)
+    return;
+  current_word.end_index = index;
+  if (current_word.has_error) {
+    if (incorrect_top < INCORRECT_MAX)
+      incorrect_stack[incorrect_top++] = current_word;
+    missed_words++;
+  } else {
+    correct_words++;
+  }
+  in_word = false;
+  current_word = (word_entry){0};
+}
+
+static void post_result(int index, char expected, char typed, bool correct) {
+  unsigned long flags;
+  spin_lock_irqsave(&wpm_lock, flags);
+  if (result_count == RESULT_SIZE) {
+
+    result_head = (result_head + 1) % RESULT_SIZE;
+    result_count--;
+  }
+  result_queue[result_tail] = (keystroke_result){
+      .index = index,
+      .expected = expected,
+      .typed = typed,
+      .correct = correct ? 1 : 0,
+  };
+  result_tail = (result_tail + 1) % RESULT_SIZE;
+  result_count++;
+  spin_unlock_irqrestore(&wpm_lock, flags);
+  wake_up_interruptible(&read_wait_queue);
+}
+
+static void wpm_event(struct input_handle *handle, unsigned int type,
+                      unsigned int code, int value) {
+  unsigned long flags;
+  char ascii;
+
+  if (type != EV_KEY)
+    return;
+
+  if (code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT) {
+    shift_held = (value == 1);
+    return;
+  }
+
+  if (value != 1)
+    return;
+
+  spin_lock_irqsave(&wpm_lock, flags);
+
+  if (driver_state != STATE_RUNNING) {
+    spin_unlock_irqrestore(&wpm_lock, flags);
+    return;
+  }
+
+  if (code == KEY_BACKSPACE) {
+    if (undo_top > 0) {
+
+      expected_char ec = undo_stack[--undo_top];
+      fifo_head = (fifo_head - 1 + FIFO_SIZE) % FIFO_SIZE;
+      fifo[fifo_head] = ec;
+      fifo_count++;
+
+      if (correct_chars > 0)
+        correct_chars--;
+      spin_unlock_irqrestore(&wpm_lock, flags);
+
+      post_result(ec.index, ec.ch, '\b', false);
+      wake_up_interruptible(&write_wait_queue);
+    } else {
+      spin_unlock_irqrestore(&wpm_lock, flags);
+    }
+    return;
+  }
+
+  ascii = shift_held ? keycode_map_shift[code] : keycode_map[code];
+  if (ascii == 0) {
+    spin_unlock_irqrestore(&wpm_lock, flags);
+    return;
+  }
+
+  if (fifo_count == 0) {
+    spin_unlock_irqrestore(&wpm_lock, flags);
+    return;
+  }
+
+  expected_char expected = fifo[fifo_head];
+
+  if (ascii == expected.ch) {
+
+    fifo_head = (fifo_head + 1) % FIFO_SIZE;
+    fifo_count--;
+    undo_stack[undo_top % UNDO_SIZE] = expected;
+    if (undo_top < UNDO_SIZE)
+      undo_top++;
+
+    correct_chars++;
+
+    if (correct_chars == 1)
+      test_start = ktime_get();
+
+    if (is_delimiter(ascii)) {
+      finalise_word(expected.index);
+    } else if (!in_word) {
+      in_word = true;
+      current_word.start_index = expected.index;
+      current_word.has_error = false;
+    }
+
+    if (fifo_count == 0) {
+      finalise_word(expected.index);
+      driver_state = STATE_COMPLETE;
+    }
+
+    spin_unlock_irqrestore(&wpm_lock, flags);
+
+    post_result(expected.index, expected.ch, ascii, true);
+    wake_up_interruptible(&write_wait_queue);
+
+  } else {
+
+    missed_chars++;
+    current_word.has_error = true;
+    spin_unlock_irqrestore(&wpm_lock, flags);
+
+    post_result(expected.index, expected.ch, ascii, false);
+  }
+}
+
+static int wpm_connect(struct input_handler *handler, struct input_dev *dev,
+                       const struct input_device_id *id) {
+  struct input_handle *handle;
+  int error;
+
+  if (dev->id.bustype == BUS_VIRTUAL)
+    return -ENODEV;
+  if (!test_bit(KEY_A, dev->keybit) || !test_bit(KEY_SPACE, dev->keybit))
+    return -ENODEV;
+
+  handle = kzalloc(sizeof(struct input_handle), GFP_KERNEL);
+  if (!handle)
+    return -ENOMEM;
+
+  handle->dev = dev;
+  handle->handler = handler;
+  handle->name = "wpm_driver";
+
+  error = input_register_handle(handle);
+  if (error) {
+    kfree(handle);
+    return error;
+  }
+
+  error = input_open_device(handle);
+  if (error) {
+    input_unregister_handle(handle);
+    kfree(handle);
+    return error;
+  }
+
+  pr_info("wpm_driver: connected to %s\n", dev->name ? dev->name : "?");
+  return 0;
+}
+
+static void wpm_disconnect(struct input_handle *handle) {
+  input_close_device(handle);
+  input_unregister_handle(handle);
+  kfree(handle);
+}
+
+static const struct input_device_id wpm_ids[] = {
+    {.flags = INPUT_DEVICE_ID_MATCH_EVBIT, .evbit = {BIT_MASK(EV_KEY)}}, {}};
+
+static struct input_handler wpm_input_handler = {
+    .event = wpm_event,
+    .connect = wpm_connect,
+    .disconnect = wpm_disconnect,
+    .name = "wpm_driver",
+    .id_table = wpm_ids,
+};
+
+static int mod_open(struct inode *inode, struct file *fileptr) {
+  pr_info("wpm_driver: opened (major=%d minor=%d)\n", imajor(inode),
+          iminor(inode));
+  return 0;
+}
+
+static int mod_release(struct inode *inode, struct file *fileptr) {
+  pr_info("wpm_driver: closed\n");
+  return 0;
+}
 
 static ssize_t mod_write(struct file *file, const char __user *user_buf,
                          size_t len, loff_t *off) {
   expected_char ec;
   unsigned long flags;
 
-  if (len != sizeof(expected_char)) {
+  if (len != sizeof(expected_char))
     return -EINVAL;
-  }
-
-  if (copy_from_user(&ec, user_buf, sizeof(expected_char))) {
+  if (copy_from_user(&ec, user_buf, sizeof(expected_char)))
     return -EFAULT;
-  }
 
-  if (wait_event_interruptible(write_wait_queue, fifo_count < FIFO_SIZE)) {
-    pr_warn("Capacity reached");
+  if (wait_event_interruptible(write_wait_queue, fifo_count < FIFO_SIZE))
     return -ERESTARTSYS;
-  }
 
   spin_lock_irqsave(&wpm_lock, flags);
-
   fifo[fifo_tail] = ec;
   fifo_tail = (fifo_tail + 1) % FIFO_SIZE;
   fifo_count++;
-
   spin_unlock_irqrestore(&wpm_lock, flags);
-  wake_up_interruptible(&read_wait_queue);
 
+  wake_up_interruptible(&read_wait_queue);
   return sizeof(expected_char);
 }
 
-MODULE_DESCRIPTION("placeholder description"); // if you don't include this
-                                               // kbuild gets very mad
-MODULE_LICENSE("GPL"); // same here (why must you force me to use GPL)
-
 static ssize_t mod_read(struct file *file, char __user *buf, size_t count,
                         loff_t *ppos) {
-  struct keystroke_result result;
+  keystroke_result res;
   unsigned long flags;
 
-  if (count != sizeof(result))
+  if (count != sizeof(res))
     return -EINVAL;
 
-  /* block until a result is in the queue */
   if (wait_event_interruptible(read_wait_queue, result_count > 0))
     return -ERESTARTSYS;
 
   spin_lock_irqsave(&wpm_lock, flags);
-  result = result_queue[result_head];
+  res = result_queue[result_head];
   result_head = (result_head + 1) % RESULT_SIZE;
   result_count--;
   spin_unlock_irqrestore(&wpm_lock, flags);
 
-  if (copy_to_user(buf, &result, sizeof(result)))
+  if (copy_to_user(buf, &res, sizeof(res)))
     return -EFAULT;
-  return sizeof(result);
+  return sizeof(res);
 }
 
 static unsigned int mod_poll(struct file *file, poll_table *wait) {
@@ -164,111 +379,9 @@ static unsigned int mod_poll(struct file *file, poll_table *wait) {
   spin_unlock_irqrestore(&wpm_lock, flags);
   return mask;
 }
-static int usb_probe(struct usb_interface *intf,
-                     const struct usb_device_id *id) {
-  printk(KERN_INFO "usb plugged in\n");
-  return 0;
-}
-
-static bool is_delimiter(char c) {
-  return c == ' ' || c == '\t' || c = '\'' || c == '"';
-}
-
-static void finalise_word(int index) {
-  if (!in_word) {
-    return;
-  }
-  current_word.end_index = index;
-  if (current_word.has_error) {
-    if (incorrect_top < INCORRECT_MAX) {
-      incorrect_stack[incorrect_top++] = current_word;
-    }
-    missed_words++;
-  } else {
-    correct_words++;
-  }
-  in_word = false;
-  current_word.has_error = false;
-  current_word.start_index = 0;
-  current_word.end_index = 0;
-}
-
-static void wpm_event(struct input_handle *handle, unsigned int type,
-                      unsigned int code, int value) {
-  unsigned long flags;
-
-  char ascii;
-
-  if (type != EV_KEY)
-    return;
-  if (code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT) {
-    shiftheld = {value == 1} return;
-  }
-  if (value != 1) {
-    return;
-  }
-
-  if (code == BACKSPACE) {
-    spin_lock_irqsave(&wpm_lock, flags);
-    if (undo_top > 0) {
-      expected_char ec = undo[--undo_top];
-      fifo_head = (fifo_head - 1 + FIFO_SIZE) % FIFO_SIZE;
-      fifo[fifo_head] = ec;
-      fifo_count++;
-      correct_char--;
-      current_word.has_error = false;
-    }
-    spin_unlock_irqrestore(&wpm_lock, flags);
-    wake_up_interruptible(&write_wait_queue);
-    return;
-  }
-
-  ascii = shift_held ? keycode_map_shift[code] : keycode_map[code];
-  if (ascii == 0)
-    return;
-
-  spin_lock_irqsave(&wpm_lock, flags);
-  if (fifo_count == 0) {
-    spin_unlock_irqrestore(&wpm_lock, flags);
-  }
-
-  expected_char expected = fifo[fifo_head];
-  if (ascii == expected.ch) {
-    fifo_head = (fifo_head + 1) % FIFO_SIZE;
-    fifo_count--;
-    undo_stack[undo_top % UNDO_SIZE] = expected;
-    if (undo_top < UNDO_SIZE) {
-      undo_top++;
-      correct_chars++;
-    }
-    if (correct_chars == 1) {
-      test_start = ktime.get();
-    }
-    if (is_delimiter(ascii)) {
-      finalise_word(expected.index);
-    } else {
-      if (!in_word) {
-        in_word = true;
-        current_word.start_index = expected.index;
-        current_word.has_error = false;
-      }
-    }
-    if (ascii == '\0' || fifo_count == 0) {
-      finalise_word(expected.index);
-    }
-    spin_unlock_irqrestore(&wpm_lock, flags);
-    wake_up_interruptible(&write_wait_queue);
-
-  } else {
-    missed_chars++;
-    current_word.has_error = true;
-    spin_unlock_irqrestore(&wpm_lock, flags);
-  }
-}
-}
 
 static long wpm_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
-  struct wpm_stats stats;
+  wpm_stats stats;
   unsigned long flags;
   ktime_t now;
   s64 em;
@@ -316,66 +429,11 @@ static long wpm_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
     return 0;
 
   case WPM_SET_LED:
-    return 0; /* no hardware on this platform */
+    return 0;
 
   default:
     return -ENOTTY;
   }
-}
-
-static int wpm_connect(struct input_handler *handler, struct input_dev *dev,
-                       const struct input_device_id *id) {
-  struct input_handle *handle, int error;
-  handle = kzalloc(sizeof(struct input_handle), GFP_KERNEL);
-  if (!handle) {
-    return -ENOMEM;
-  }
-  handle->dev = dev;
-  handle->handler = handler;
-  handlle->name = "wpm_driver";
-  error = input_register_handler(handle);
-  if (error) {
-    kfree(handle);
-    return error;
-  }
-  error = input_open_device(handle);
-  if (error) {
-    input_unregister_handle(handle);
-    kfree(handle);
-    return error;
-  }
-  pr_info("wpm_driver: connected to %s\n", dev->name);
-  return 0;
-}
-
-static void wpm_disconnect(struct input_handle *handle) {
-  input_close_device(handle);
-  input_unregister_handle(handle);
-  kfree(handle);
-}
-
-static void usb_dc(struct usb_interface *intf) {
-  printk(KERN_INFO "disconnecting usb\n");
-}
-
-int major;
-dev_t dev;
-static struct cdev cdev;
-static struct class *cl;
-
-static int mod_open(struct inode *inode, struct file *fileptr) {
-  pr_info("Major device number: %d | Minor device number: %d\n", imajor(inode),
-          iminor(inode));
-
-  pr_info("Fileptr->f_pos : %lld\n", fileptr->f_pos);
-  pr_info("Fileptr->f_mode : %lld\n", fileptr->f_mode);
-  pr_info("Fileptr->f_flags: %lld\n", fileptr->f_flags);
-  return 0;
-}
-
-static int mod_release(struct inode *inode, struct file *fileptr) {
-  pr_info("The file has closed\n");
-  return 0;
 }
 
 static int proc_state_show(struct seq_file *m, void *v) {
@@ -390,20 +448,111 @@ static int proc_state_show(struct seq_file *m, void *v) {
   return 0;
 }
 
-static int proc_state_open(struct inode *i, struct file *f) {
-  return single_open(f, proc_state_show, NULL);
+static int proc_state_open(struct inode *inode, struct file *file) {
+
+  return single_open(file, proc_state_show, NULL);
 }
+
+static int proc_stats_show(struct seq_file *m, void *v) {
+  unsigned long flags;
+  int cw, mw, cc, mc;
+  s64 em;
+  driver_state_t s;
+
+  spin_lock_irqsave(&wpm_lock, flags);
+  cw = correct_words;
+  mw = missed_words;
+  cc = correct_chars;
+  mc = missed_chars;
+  em = ktime_to_ms(ktime_sub(ktime_get(), test_start));
+  s = driver_state;
+  spin_unlock_irqrestore(&wpm_lock, flags);
+
+  int tw = cw + mw, tc = cc + mc;
+  int wpm = em > 0 ? (int)((cw * 60000LL) / em) : 0;
+  int raw_wpm = em > 0 ? (int)(((cw + mw) * 60000LL) / em) : 0;
+
+  seq_printf(m, "state:           %s\n",
+             s == STATE_IDLE      ? "IDLE"
+             : s == STATE_RUNNING ? "RUNNING"
+                                  : "COMPLETE");
+  seq_printf(m, "wpm:             %d\n", wpm);
+  seq_printf(m, "raw_wpm:         %d\n", raw_wpm);
+  seq_printf(m, "word_accuracy:   %d%%\n", tw > 0 ? (cw * 100) / tw : 0);
+  seq_printf(m, "char_accuracy:   %d%%\n", tc > 0 ? (cc * 100) / tc : 0);
+  seq_printf(m, "correct_words:   %d\n", cw);
+  seq_printf(m, "missed_words:    %d\n", mw);
+  seq_printf(m, "correct_chars:   %d\n", cc);
+  seq_printf(m, "missed_chars:    %d\n", mc);
+  seq_printf(m, "elapsed_seconds: %lld\n", em / 1000);
+  return 0;
+}
+
+static int proc_stats_open(struct inode *inode, struct file *file) {
+  return single_open(file, proc_stats_show, NULL);
+}
+
+static int proc_errors_show(struct seq_file *m, void *v) {
+  unsigned long flags;
+  int i, top;
+  word_entry local[INCORRECT_MAX];
+
+  spin_lock_irqsave(&wpm_lock, flags);
+  top = incorrect_top;
+  memcpy(local, incorrect_stack, top * sizeof(word_entry));
+  spin_unlock_irqrestore(&wpm_lock, flags);
+
+  for (i = 0; i < top; i++)
+    seq_printf(m, "%d:%d\n", local[i].start_index, local[i].end_index);
+  return 0;
+}
+
+static int proc_errors_open(struct inode *inode, struct file *file) {
+  return single_open(file, proc_errors_show, NULL);
+}
+
+static const struct proc_ops proc_state_fops = {
+    .proc_open = proc_state_open,
+    .proc_read = seq_read,
+    .proc_lseek = seq_lseek,
+    .proc_release = single_release,
+};
+
+static const struct proc_ops proc_stats_fops = {
+    .proc_open = proc_stats_open,
+    .proc_read = seq_read,
+    .proc_lseek = seq_lseek,
+    .proc_release = single_release,
+};
+
+static const struct proc_ops proc_errors_fops = {
+    .proc_open = proc_errors_open,
+    .proc_read = seq_read,
+    .proc_lseek = seq_lseek,
+    .proc_release = single_release,
+};
 
 static const struct file_operations fops = {
     .owner = THIS_MODULE,
-    .read = mod_read,
     .open = mod_open,
     .release = mod_release,
+    .read = mod_read,
     .write = mod_write,
     .poll = mod_poll,
+    .unlocked_ioctl = wpm_ioctl,
 };
 
-struct usb_device_id usbdid[] = {{USB_DEVICE(0x2e8a, 0x0009)}, {}};
+static int usb_probe(struct usb_interface *intf,
+                     const struct usb_device_id *id) {
+  printk(KERN_INFO "usb plugged in\n");
+  return 0;
+}
+
+static void usb_dc(struct usb_interface *intf) {
+  printk(KERN_INFO "disconnecting usb\n");
+}
+
+static struct usb_device_id usbdid[] = {{USB_DEVICE(0x2e8a, 0x0009)}, {}};
 
 static struct usb_driver usbd = {
     .name = "uniproject",
@@ -413,41 +562,58 @@ static struct usb_driver usbd = {
 };
 
 static int __init custom_init(void) {
-  // get a device number (cat /proc/devices)
+  int ret;
+
   if (alloc_chrdev_region(&dev, 0, 1, "uniproject")) {
-    printk(KERN_ERR "device allocation failed!\n");
+    pr_err("device allocation failed\n");
     return -ECANCELED;
   }
 
-  // make a device class (ls /sys/class)
   if (!(cl = class_create("uniprojclass"))) {
-    printk(KERN_ERR "class creation failed!\n");
+    pr_err("class creation failed\n");
     unregister_chrdev_region(dev, 1);
     return -ECANCELED;
   }
 
-  // initialize chardevice
   cdev_init(&cdev, &fops);
   if (cdev_add(&cdev, dev, 1) < 0) {
-    printk(KERN_ERR "chardevice init failed!\n");
+    pr_err("chardevice init failed\n");
     class_destroy(cl);
     unregister_chrdev_region(dev, 1);
     return -ECANCELED;
   }
 
-  // create the device (ls /dev)
   if (!device_create(cl, NULL, dev, NULL, "uniprojdev")) {
-    printk(KERN_ERR "device creation failed!\n");
+    pr_err("device creation failed\n");
     cdev_del(&cdev);
     class_destroy(cl);
     unregister_chrdev_region(dev, 1);
     return -ECANCELED;
   }
 
-  proc_create("wpm_state", 0444, NULL, )
+  proc_create("wpm_state", 0444, NULL, &proc_state_fops);
+  proc_create("wpm_stats", 0444, NULL, &proc_stats_fops);
+  proc_create("wpm_errors", 0444, NULL, &proc_errors_fops);
 
-      if (usb_register(&usbd) < 0) {
-    printk(KERN_ERR "USB registration failed!\n");
+  ret = input_register_handler(&wpm_input_handler);
+  if (ret) {
+    pr_err("input_register_handler failed: %d\n", ret);
+    remove_proc_entry("wpm_state", NULL);
+    remove_proc_entry("wpm_stats", NULL);
+    remove_proc_entry("wpm_errors", NULL);
+    device_destroy(cl, dev);
+    cdev_del(&cdev);
+    class_destroy(cl);
+    unregister_chrdev_region(dev, 1);
+    return ret;
+  }
+
+  if (usb_register(&usbd) < 0) {
+    pr_err("USB registration failed\n");
+    input_unregister_handler(&wpm_input_handler);
+    remove_proc_entry("wpm_state", NULL);
+    remove_proc_entry("wpm_stats", NULL);
+    remove_proc_entry("wpm_errors", NULL);
     device_destroy(cl, dev);
     cdev_del(&cdev);
     class_destroy(cl);
@@ -456,23 +622,22 @@ static int __init custom_init(void) {
   }
 
   major = MAJOR(dev);
-
-#ifdef DEBUG
-  printk(KERN_INFO "placeholder loaded (major num: %d)\n", major);
-#endif
-
+  pr_info("wpm_driver: loaded (major=%d)\n", major);
   return 0;
 }
+
 static void __exit custom_exit(void) {
   usb_deregister(&usbd);
+
+  input_unregister_handler(&wpm_input_handler);
+  remove_proc_entry("wpm_state", NULL);
+  remove_proc_entry("wpm_stats", NULL);
+  remove_proc_entry("wpm_errors", NULL);
   device_destroy(cl, dev);
   cdev_del(&cdev);
   class_destroy(cl);
   unregister_chrdev_region(dev, 1);
-
-#ifdef DEBUG
-  printk(KERN_INFO "placeholder ended\n");
-#endif
+  pr_info("wpm_driver: unloaded\n");
 }
 
 module_init(custom_init);
