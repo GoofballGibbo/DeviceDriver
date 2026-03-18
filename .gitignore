@@ -2,6 +2,9 @@
 build
 generated
 
+/Test/*
+!/Test/*.c
+
 # clangd config
 .cache
 .clangd
