@@ -1,3 +1,16 @@
+
+/* project_driver.c
+ * Linux kernel module implementing a WPM (words-per-minute) typing test driver.
+ *
+ * Overview:
+ *   - Registers as a character device (/dev/uniprojdev) so a userspace app can
+ *     feed in the expected text (write) and read back per-keystroke results (read).
+ *   - Hooks into the Linux input subsystem to intercept raw keyboard events
+ *   - Communicates with an microcontroller over USB serial to drive an
+ *     RGB LED: green on correct keypress, red on mistake, off on backspace.
+ *   - Exposes live stats via /proc (wpm_state, wpm_stats, wpm_errors).
+ */
+
 #include <linux/cdev.h>
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -27,10 +40,21 @@ MODULE_VERSION("0.1.0");
 
 #define DEVICE_NAME "uniprojdev"
 #define CLASS_NAME "uniprojclass"
+
+/* Circular buffer sizes.
+ * FIFO_SIZE: how many expected characters the userapp can queue ahead of time.
+ * UNDO_SIZE: how many keystrokes can be undone with backspace.
+ * RESULT_SIZE: how many keystroke results can be buffered before the oldest is dropped. */
+
 #define FIFO_SIZE 256
 #define UNDO_SIZE 256
 #define RESULT_SIZE 64
 #define INCORRECT_MAX 128
+
+
+/* ioctl command definitions.
+ * WPM_MAGIC is the unique type byte that distinguishes our commands.
+ * _IO, _IOR, _IOW are kernel macros that encode direction + size into the cmd number. */
 
 #define WPM_MAGIC 'W'
 #define WPM_START _IO(WPM_MAGIC, 0)
@@ -132,6 +156,9 @@ static int write_led(char rgb[3], size_t n) {
     return 0;
 }
 
+/* mod_read - read one keystroke_result out of the result queue into userspace.
+ * Blocks until at least one result is available (wait_event_interruptible).
+ * Returns sizeof(keystroke_result) on success, or a negative error code. */
 
 static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t* offset) {
 #ifdef DEBUG
@@ -157,6 +184,11 @@ static ssize_t mod_read(struct file* fd, char __user* buf, size_t nbytes, loff_t
         return -EFAULT;
     return sizeof(res);
 }
+
+
+/* mod_write - accept one expected_char from userspace into the FIFO.
+ * The userapp calls this repeatedly to pre-load the full test string before
+ * (or during) the test.  Blocks if the FIFO is full. */
 
 static ssize_t mod_write(struct file* fd, const char __user* buf, size_t nbytes, loff_t* offset) {
     expected_char ec;
@@ -194,6 +226,9 @@ static int mod_release(struct inode* inode, struct file* fileptr) {
     return 0;
 }
 
+/* mod_poll - allow userspace to use select()/poll() on our device.
+ * Returns POLLIN if there are results to read, POLLOUT if there is FIFO space. */
+
 static unsigned int mod_poll(struct file* file, poll_table* wait) {
     unsigned int mask = 0;
     unsigned long flags;
@@ -226,6 +261,14 @@ static void finalise_word(int index) {
     current_word = (word_entry){0};
 }
 
+/* post_result - record a keystroke outcome and signal the LED.
+ * Called from wpm_event() after the spinlock is released (write_led may sleep).
+ *
+ * If the result queue is full, the oldest entry is silently dropped to make room —
+ * we prefer losing old data over blocking in an input event handler.
+ *
+ * LED colours: green = correct, red = mistake, off = backspace. */
+
 static void post_result(int index, char expected, char typed, bool correct) {
     unsigned long flags;
     spin_lock_irqsave(&wpm_lock, flags);
@@ -256,6 +299,18 @@ static void post_result(int index, char expected, char typed, bool correct) {
     }
 }
 
+/* wpm_event - input subsystem callback, fired for every key event on connected keyboards.
+ *
+ * This runs in interrupt context so it must not sleep.  All shared state is
+ * protected by wpm_lock.  post_result() is called *after* unlocking so that
+ * kernel_write() (which can sleep) is never called under the spinlock.
+ *
+ * Flow:
+ *   1. Ignore anything that isn't a key-down event (EV_KEY, value==1).
+ *   2. Track Shift state separately.
+ *   3. On BACKSPACE: pop the undo stack and push the char back onto the FIFO.
+ *   4. On any other key: translate the scancode to ASCII, compare against the
+ *      head of the FIFO, and record correct/incorrect accordingly. */
 
 static void wpm_event(struct input_handle* handle, unsigned int type, unsigned int code, int value) {
     unsigned long flags;
@@ -292,7 +347,6 @@ static void wpm_event(struct input_handle* handle, unsigned int type, unsigned i
             spin_unlock_irqrestore(&wpm_lock, flags);
 
             post_result(ec.index, ec.ch, '\b', false);
-            wake_up_interruptible(&write_wait_queue);
         } else {
             spin_unlock_irqrestore(&wpm_lock, flags);
         }
@@ -407,6 +461,14 @@ static struct input_handler wpm_input_handler = {
     .id_table = wpm_ids,
 };
 
+/* wpm_ioctl - handle control commands from userspace.
+ *
+ * WPM_START:     transition to RUNNING state and latch the start time.
+ * WPM_STOP:      force transition to COMPLETE (e.g. user gave up).
+ * WPM_RESET:     clear all buffers and counters, return to IDLE.
+ * WPM_GET_STATS: compute and copy a wpm_stats snapshot to userspace.
+ * WPM_SET_LED:   stub — LED is currently driven automatically by post_result(). */
+
 static long wpm_ioctl(struct file* file, unsigned int cmd, unsigned long arg) {
     wpm_stats stats;
     unsigned long flags;
@@ -455,13 +517,20 @@ static long wpm_ioctl(struct file* file, unsigned int cmd, unsigned long arg) {
         return 0;
 
     case WPM_SET_LED:
-        return 0;
+        char rgb[3] = {0, 0, (char)(arg & 0xFF)};
+        return write_led(rgb, 3);
 
     default:
         return -ENOTTY;
     }
 }
 
+/* ── /proc interface ────────────────────────────────────────────────────────
+ * Three read-only proc files let you inspect driver state without opening
+ * the character device:
+ *   /proc/wpm_state  — IDLE / RUNNING / COMPLETE
+ *   /proc/wpm_stats  — full stats dump
+ *   /proc/wpm_errors — list of word spans that contained errors (start:end) */
 
 static int proc_state_show(struct seq_file* m, void* v) {
     unsigned long flags;
@@ -605,6 +674,19 @@ static struct usb_driver usbd = {
     .id_table = usbdid,
 };
 
+/* custom_init - module entry point.
+ *
+ * Initialisation order matters:
+ *   1. Allocate a dynamic major number.
+ *   2. Create a device class (shows up in /sys/class).
+ *   3. Initialise and add the cdev.
+ *   4. Create the /dev node via device_create().
+ *   5. Register /proc entries.
+ *   6. Register the input handler (start intercepting keyboard events).
+ *   7. Register the USB driver (start watching for the RP2350).
+ *
+ * If any step fails, all previously registered resources are cleaned up
+ * in reverse order to avoid resource leaks. */
 
 static int __init custom_init(void) {
     int ret;
