@@ -9,23 +9,25 @@
 typedef struct {
     int index;
     char ch;
-} expected_char_t;
+} expected_char;
 typedef struct {
     int index;
     char expected;
     char typed;
     int correct;
-} keystroke_result_t;
+} keystroke_result;
 typedef struct {
     int correct_words, missed_words, correct_chars, missed_chars, elapsed_seconds, wpm, raw_wpm;
-} wpm_stats_t;
+} wpm_stats;
+
 
 #define WPM_MAGIC 'W'
 #define WPM_START _IO(WPM_MAGIC, 0)
 #define WPM_STOP _IO(WPM_MAGIC, 1)
 #define WPM_RESET _IO(WPM_MAGIC, 2)
-#define WPM_GET_STATS _IOR(WPM_MAGIC, 3, wpm_stats_t)
+#define WPM_GET_STATS _IOR(WPM_MAGIC, 3, wpm_stats)
 #define WPM_SET_LED _IOW(WPM_MAGIC, 4, int)
 #define DEVICE "/dev/uniprojdev"
+
 
 #endif

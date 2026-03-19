@@ -319,10 +319,7 @@ static void wpm_event(struct input_handle* handle, unsigned int type, unsigned i
     if (type != EV_KEY)
         return;
 
-    if (code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT) {
-        shift_held = (value == 1);
-        return;
-    }
+    shift_held = test_bit(KEY_LEFTSHIFT, handle->dev->key) || test_bit(KEY_RIGHTSHIFT, handle->dev->key);
 
     if (value != 1)
         return;
