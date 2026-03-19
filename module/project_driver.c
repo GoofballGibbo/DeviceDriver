@@ -244,7 +244,7 @@ static void post_result(int index, char expected, char typed, bool correct) {
     result_count++;
     spin_unlock_irqrestore(&wpm_lock, flags);
     wake_up_interruptible(&read_wait_queue);
-    if (typed == '/b') {
+    if (typed == '\b') {
         char off[3] = [ 0, 0, 0 ];
         write_led(off, 3);
     } else if (correct) {
