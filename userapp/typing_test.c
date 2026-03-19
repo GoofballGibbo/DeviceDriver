@@ -274,8 +274,7 @@ static void* display_thread(void* arg) {
 
 int main(int argc, char* argv[]) {
     static char fbuf[65536];
-    text = "the quick brown fox jumps over the lazy dog. does this work. i hope "
-           "it does? let's see";
+    text = "'The Answer to the Great Question... Of Life, the Universe and Everything... Is... 42.' said Deep Thought, with infinite majesty and calm.";
 
     if (argc > 1) {
         FILE* f = fopen(argv[1], "r");

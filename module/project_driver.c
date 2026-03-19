@@ -34,7 +34,7 @@ MODULE_AUTHOR("a group of CS students");
 MODULE_DESCRIPTION("WPM Typing Tester Driver");
 MODULE_VERSION("0.1.0");
 
-#define DEBUG // debug prints
+/* #define DEBUG // debug prints */
 
 #define DEVFILE "/dev/ttyACM0" // terrible solution. if i can do better i will
 
