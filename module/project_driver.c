@@ -23,7 +23,7 @@ MODULE_VERSION("0.1.0");
 
 #define DEBUG // debug prints
 
-#define DEVFILE "/dev/rp2350" // terrible solution. if i can do better i will
+#define DEVFILE "/dev/ttyACM0" // terrible solution. if i can do better i will
 
 #define DEVICE_NAME "uniprojdev"
 #define CLASS_NAME "uniprojclass"
@@ -245,13 +245,13 @@ static void post_result(int index, char expected, char typed, bool correct) {
     spin_unlock_irqrestore(&wpm_lock, flags);
     wake_up_interruptible(&read_wait_queue);
     if (typed == '\b') {
-        char off[3] = { 0, 0, 0 };
+        char off[3] = {0, 0, 0};
         write_led(off, 3);
     } else if (correct) {
-        char green[3] = { 0, 255, 0 };
+        char green[3] = {0, 0x10, 0};
         write_led(green, 3);
     } else {
-        char red[3] = { 255, 0, 0 };
+        char red[3] = {0x10, 0, 0};
         write_led(red, 3);
     }
 }

@@ -1,1 +1,0 @@
-SUBSYSTEM=="tty", ATTRS{idProduct}=="0009", ATTRS{idVendor}=="2e8a", ATTRS{serial}=="D4A3EFB2B479A728", SYMLINK+="rp2350"
